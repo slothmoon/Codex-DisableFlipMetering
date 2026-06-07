@@ -51,6 +51,9 @@ std::atomic<bool> g_paused{ false };
 std::thread g_watcherThread;
 std::mutex g_stateMutex;
 std::vector<std::wstring> g_whitelist;
+std::unordered_set<std::wstring> g_whitelistNames;
+std::unordered_set<std::wstring> g_whitelistPaths;
+bool g_hasPathWhitelist = false;
 std::unordered_set<DWORD> g_attemptedPids;
 std::wstring g_exePath;
 std::wstring g_exeDir;
@@ -144,6 +147,18 @@ std::wstring fileNameFromPath(const std::wstring& path)
 {
     const size_t slash = path.find_last_of(L"\\/");
     return slash == std::wstring::npos ? path : path.substr(slash + 1);
+}
+
+bool isPathEntry(const std::wstring& value)
+{
+    return value.find(L'\\') != std::wstring::npos || value.find(L'/') != std::wstring::npos;
+}
+
+std::wstring normalizeWhitelistValue(std::wstring value)
+{
+    value = toLower(trim(std::move(value)));
+    std::replace(value.begin(), value.end(), L'/', L'\\');
+    return value;
 }
 
 std::wstring joinPath(const std::wstring& dir, const std::wstring& name)
@@ -246,6 +261,8 @@ void ensureDefaultFiles()
 void loadWhitelist()
 {
     std::vector<std::wstring> entries;
+    std::unordered_set<std::wstring> names;
+    std::unordered_set<std::wstring> paths;
     std::wstring content = readTextFile(g_whitelistPath);
     size_t start = 0;
     while (start <= content.size())
@@ -253,7 +270,14 @@ void loadWhitelist()
         const size_t end = content.find_first_of(L"\r\n", start);
         std::wstring line = trim(content.substr(start, end == std::wstring::npos ? std::wstring::npos : end - start));
         if (!line.empty() && line[0] != L'#')
+        {
             entries.push_back(line);
+            std::wstring normalized = normalizeWhitelistValue(line);
+            if (isPathEntry(normalized))
+                paths.insert(normalized);
+            else
+                names.insert(normalized);
+        }
 
         if (end == std::wstring::npos)
             break;
@@ -264,12 +288,28 @@ void loadWhitelist()
 
     std::lock_guard<std::mutex> lock(g_stateMutex);
     g_whitelist = std::move(entries);
+    g_whitelistNames = std::move(names);
+    g_whitelistPaths = std::move(paths);
+    g_hasPathWhitelist = !g_whitelistPaths.empty();
 }
 
 std::vector<std::wstring> whitelistSnapshot()
 {
     std::lock_guard<std::mutex> lock(g_stateMutex);
     return g_whitelist;
+}
+
+struct WhitelistMatchSnapshot
+{
+    std::unordered_set<std::wstring> names;
+    std::unordered_set<std::wstring> paths;
+    bool hasPathEntries = false;
+};
+
+WhitelistMatchSnapshot whitelistMatchSnapshot()
+{
+    std::lock_guard<std::mutex> lock(g_stateMutex);
+    return { g_whitelistNames, g_whitelistPaths, g_hasPathWhitelist };
 }
 
 bool pidWasAttempted(DWORD pid)
@@ -296,29 +336,21 @@ void pruneAttemptedPids(const std::unordered_set<DWORD>& livePids)
     }
 }
 
-bool matchesWhitelist(const std::vector<std::wstring>& whitelist, const std::wstring& exeName, const std::wstring& fullPath)
+bool matchesWhitelist(const WhitelistMatchSnapshot& whitelist, const std::wstring& exeName, const std::wstring& fullPath)
 {
     const std::wstring exeLower = toLower(exeName);
-    const std::wstring pathLower = toLower(fullPath);
+    if (whitelist.names.find(exeLower) != whitelist.names.end())
+        return true;
 
-    for (const std::wstring& entry : whitelist)
-    {
-        const std::wstring item = toLower(trim(entry));
-        if (item.empty())
-            continue;
+    if (!whitelist.hasPathEntries || fullPath.empty())
+        return false;
 
-        if (item.find(L'\\') != std::wstring::npos || item.find(L'/') != std::wstring::npos)
-        {
-            if (pathLower == item)
-                return true;
-        }
-        else if (exeLower == item)
-        {
-            return true;
-        }
-    }
+    return whitelist.paths.find(normalizeWhitelistValue(fullPath)) != whitelist.paths.end();
+}
 
-    return false;
+bool matchesWhitelistedName(const WhitelistMatchSnapshot& whitelist, const std::wstring& exeName)
+{
+    return whitelist.names.find(toLower(exeName)) != whitelist.names.end();
 }
 
 std::wstring processPath(DWORD pid)
@@ -454,7 +486,7 @@ void watcherLoop()
     {
         if (!g_paused)
         {
-            const std::vector<std::wstring> whitelist = whitelistSnapshot();
+            const WhitelistMatchSnapshot whitelist = whitelistMatchSnapshot();
             std::unordered_set<DWORD> livePids;
             HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
             if (snapshot != INVALID_HANDLE_VALUE)
@@ -469,9 +501,17 @@ void watcherLoop()
                         if (pidWasAttempted(entry.th32ProcessID))
                             continue;
 
-                        std::wstring fullPath = processPath(entry.th32ProcessID);
-                        std::wstring exeName = fullPath.empty() ? entry.szExeFile : fileNameFromPath(fullPath);
-                        if (matchesWhitelist(whitelist, exeName, fullPath))
+                        std::wstring exeName = entry.szExeFile;
+                        std::wstring fullPath;
+                        const bool nameMatched = matchesWhitelistedName(whitelist, exeName);
+                        if (!nameMatched && whitelist.hasPathEntries)
+                        {
+                            fullPath = processPath(entry.th32ProcessID);
+                            if (!fullPath.empty())
+                                exeName = fileNameFromPath(fullPath);
+                        }
+
+                        if (nameMatched || matchesWhitelist(whitelist, exeName, fullPath))
                         {
                             markPidAttempted(entry.th32ProcessID);
                             injectPayload(entry.th32ProcessID, exeName);
