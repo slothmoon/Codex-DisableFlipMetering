@@ -186,9 +186,23 @@ std::wstring utf8ToWide(const std::string& text)
     if (text.empty())
         return {};
 
-    const int size = MultiByteToWideChar(CP_UTF8, 0, text.c_str(), static_cast<int>(text.size()), nullptr, 0);
+    const char* data = text.data();
+    int byteCount = static_cast<int>(text.size());
+    if (byteCount >= 3 &&
+        static_cast<unsigned char>(data[0]) == 0xEF &&
+        static_cast<unsigned char>(data[1]) == 0xBB &&
+        static_cast<unsigned char>(data[2]) == 0xBF)
+    {
+        data += 3;
+        byteCount -= 3;
+    }
+
+    const int size = MultiByteToWideChar(CP_UTF8, 0, data, byteCount, nullptr, 0);
+    if (size <= 0)
+        return {};
+
     std::wstring result(size, L'\0');
-    MultiByteToWideChar(CP_UTF8, 0, text.c_str(), static_cast<int>(text.size()), result.data(), size);
+    MultiByteToWideChar(CP_UTF8, 0, data, byteCount, result.data(), size);
     return result;
 }
 
@@ -235,7 +249,7 @@ void appendLog(const std::wstring& message)
     swprintf_s(line, L"[%02u:%02u:%02u] %s\r\n", time.wHour, time.wMinute, time.wSecond, message.c_str());
 
     const std::string bytes = wideToUtf8(line);
-    HANDLE file = CreateFileW(g_logPath.c_str(), FILE_APPEND_DATA, FILE_SHARE_READ, nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    HANDLE file = CreateFileW(g_logPath.c_str(), FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
     if (file == INVALID_HANDLE_VALUE)
         return;
 
@@ -271,12 +285,17 @@ void loadWhitelist()
         std::wstring line = trim(content.substr(start, end == std::wstring::npos ? std::wstring::npos : end - start));
         if (!line.empty() && line[0] != L'#')
         {
-            entries.push_back(line);
             std::wstring normalized = normalizeWhitelistValue(line);
             if (isPathEntry(normalized))
-                paths.insert(normalized);
+            {
+                if (paths.insert(normalized).second)
+                    entries.push_back(line);
+            }
             else
-                names.insert(normalized);
+            {
+                if (names.insert(normalized).second)
+                    entries.push_back(line);
+            }
         }
 
         if (end == std::wstring::npos)
@@ -531,7 +550,8 @@ void watcherLoop()
             }
         }
 
-        Sleep(2000);
+        for (int i = 0; g_running && i < 20; ++i)
+            Sleep(100);
     }
 }
 
@@ -541,9 +561,14 @@ bool startWithWindowsEnabled()
     if (RegOpenKeyExW(HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\CurrentVersion\\Run", 0, KEY_READ, &key) != ERROR_SUCCESS)
         return false;
 
-    const LONG result = RegQueryValueExW(key, kRunValueName, nullptr, nullptr, nullptr, nullptr);
+    wchar_t value[MAX_PATH * 4]{};
+    DWORD type = 0;
+    DWORD size = sizeof(value);
+    const LONG result = RegQueryValueExW(key, kRunValueName, nullptr, &type, reinterpret_cast<BYTE*>(value), &size);
     RegCloseKey(key);
-    return result == ERROR_SUCCESS;
+
+    const std::wstring expected = L"\"" + g_exePath + L"\"";
+    return result == ERROR_SUCCESS && type == REG_SZ && std::wstring(value) == expected;
 }
 
 void setStartWithWindows(bool enabled)
@@ -611,10 +636,16 @@ void populateWhitelistList(HWND list)
 void saveWhitelistList(HWND list)
 {
     const int count = static_cast<int>(SendMessageW(list, LB_GETCOUNT, 0, 0));
+    if (count == LB_ERR)
+        return;
+
     std::wstring content;
     for (int i = 0; i < count; ++i)
     {
         const int len = static_cast<int>(SendMessageW(list, LB_GETTEXTLEN, i, 0));
+        if (len == LB_ERR)
+            continue;
+
         std::wstring item(len + 1, L'\0');
         SendMessageW(list, LB_GETTEXT, i, reinterpret_cast<LPARAM>(item.data()));
         item.resize(len);
@@ -627,6 +658,26 @@ void saveWhitelistList(HWND list)
 
     writeTextFile(g_whitelistPath, content);
     loadWhitelist();
+}
+
+bool listContainsNormalizedEntry(HWND list, const std::wstring& entry)
+{
+    const std::wstring normalizedEntry = normalizeWhitelistValue(entry);
+    const int count = static_cast<int>(SendMessageW(list, LB_GETCOUNT, 0, 0));
+    for (int i = 0; i < count; ++i)
+    {
+        const int len = static_cast<int>(SendMessageW(list, LB_GETTEXTLEN, i, 0));
+        if (len == LB_ERR)
+            continue;
+
+        std::wstring item(len + 1, L'\0');
+        SendMessageW(list, LB_GETTEXT, i, reinterpret_cast<LPARAM>(item.data()));
+        item.resize(len);
+        if (normalizeWhitelistValue(item) == normalizedEntry)
+            return true;
+    }
+
+    return false;
 }
 
 void addEntryFromEdit(EditorState* state)
@@ -642,7 +693,8 @@ void addEntryFromEdit(EditorState* state)
     if (item.empty())
         return;
 
-    SendMessageW(state->list, LB_ADDSTRING, 0, reinterpret_cast<LPARAM>(item.c_str()));
+    if (!listContainsNormalizedEntry(state->list, item))
+        SendMessageW(state->list, LB_ADDSTRING, 0, reinterpret_cast<LPARAM>(item.c_str()));
     SetWindowTextW(state->entry, L"");
     SetFocus(state->entry);
 }
@@ -701,7 +753,10 @@ LRESULT CALLBACK editorProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam)
             ofn.nMaxFile = static_cast<DWORD>(std::size(file));
             ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST;
             if (GetOpenFileNameW(&ofn))
-                SendMessageW(state->list, LB_ADDSTRING, 0, reinterpret_cast<LPARAM>(file));
+            {
+                if (!listContainsNormalizedEntry(state->list, file))
+                    SendMessageW(state->list, LB_ADDSTRING, 0, reinterpret_cast<LPARAM>(file));
+            }
         }
         else if (LOWORD(wparam) == kIdRemoveExe)
         {

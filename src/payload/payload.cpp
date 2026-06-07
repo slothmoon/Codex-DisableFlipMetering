@@ -129,7 +129,7 @@ bool patchImport(HMODULE module, const char* importedModuleName, const char* pro
     for (; desc->Name; ++desc)
     {
         const char* dllName = reinterpret_cast<const char*>(base + desc->Name);
-        if (_stricmp(dllName, importedModuleName) != 0 || !desc->OriginalFirstThunk)
+        if (_stricmp(dllName, importedModuleName) != 0 || !desc->OriginalFirstThunk || !desc->FirstThunk)
             continue;
 
         auto* thunk = reinterpret_cast<IMAGE_THUNK_DATA*>(base + desc->FirstThunk);
@@ -155,7 +155,9 @@ bool patchImport(HMODULE module, const char* importedModuleName, const char* pro
             if (original && !*original)
                 *original = current;
             thunk->u1.Function = reinterpret_cast<ULONG_PTR>(replacement);
-            VirtualProtect(&thunk->u1.Function, sizeof(void*), oldProtect, &oldProtect);
+            DWORD ignoredProtect = 0;
+            VirtualProtect(&thunk->u1.Function, sizeof(void*), oldProtect, &ignoredProtect);
+            FlushInstructionCache(GetCurrentProcess(), &thunk->u1.Function, sizeof(void*));
             patched = true;
         }
     }
