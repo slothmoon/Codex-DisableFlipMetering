@@ -36,15 +36,12 @@ constexpr UINT kIdExit = 1005;
 constexpr UINT kIdSave = 2001;
 constexpr UINT kIdCancel = 2002;
 constexpr UINT kIdAddExe = 2003;
-constexpr UINT kIdClose = 2004;
 constexpr UINT kIdRemoveExe = 2005;
-constexpr UINT kIdRefreshLog = 2006;
 constexpr UINT kIdEntry = 2007;
 constexpr UINT kIdAddEntry = 2008;
 constexpr wchar_t kWindowClass[] = L"FlipConfigBypassTray";
 constexpr wchar_t kEditorClass[] = L"FlipConfigBypassEditor";
-constexpr wchar_t kLogClass[] = L"FlipConfigBypassLog";
-constexpr wchar_t kTaskName[] = L"FlipConfigBypass";
+constexpr wchar_t kRunValueName[] = L"FlipConfigBypass";
 
 HINSTANCE g_instance = nullptr;
 HWND g_window = nullptr;
@@ -491,47 +488,36 @@ void watcherLoop()
     }
 }
 
-bool runHiddenProcess(std::wstring commandLine, DWORD* exitCode = nullptr)
-{
-    STARTUPINFOW startup{};
-    startup.cb = sizeof(startup);
-    startup.dwFlags = STARTF_USESHOWWINDOW;
-    startup.wShowWindow = SW_HIDE;
-
-    PROCESS_INFORMATION processInfo{};
-    if (!CreateProcessW(nullptr, commandLine.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr, nullptr, &startup, &processInfo))
-        return false;
-
-    WaitForSingleObject(processInfo.hProcess, 15000);
-    DWORD code = 1;
-    GetExitCodeProcess(processInfo.hProcess, &code);
-    CloseHandle(processInfo.hThread);
-    CloseHandle(processInfo.hProcess);
-    if (exitCode)
-        *exitCode = code;
-    return code == 0;
-}
-
 bool startWithWindowsEnabled()
 {
-    DWORD exitCode = 1;
-    runHiddenProcess(std::wstring(L"schtasks.exe /Query /TN \"") + kTaskName + L"\"", &exitCode);
-    return exitCode == 0;
+    HKEY key = nullptr;
+    if (RegOpenKeyExW(HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\CurrentVersion\\Run", 0, KEY_READ, &key) != ERROR_SUCCESS)
+        return false;
+
+    const LONG result = RegQueryValueExW(key, kRunValueName, nullptr, nullptr, nullptr, nullptr);
+    RegCloseKey(key);
+    return result == ERROR_SUCCESS;
 }
 
 void setStartWithWindows(bool enabled)
 {
+    HKEY key = nullptr;
+    if (RegCreateKeyExW(HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\CurrentVersion\\Run", 0, nullptr, 0, KEY_SET_VALUE, nullptr, &key, nullptr) != ERROR_SUCCESS)
+        return;
+
     if (enabled)
     {
-        std::wstring command = std::wstring(L"schtasks.exe /Create /TN \"") + kTaskName +
-            L"\" /SC ONLOGON /TR \"\\\"" + g_exePath + L"\\\"\" /F";
-        runHiddenProcess(command);
+        std::wstring command = L"\"" + g_exePath + L"\"";
+        RegSetValueExW(key, kRunValueName, 0, REG_SZ,
+            reinterpret_cast<const BYTE*>(command.c_str()),
+            static_cast<DWORD>((command.size() + 1) * sizeof(wchar_t)));
     }
     else
     {
-        std::wstring command = std::wstring(L"schtasks.exe /Delete /TN \"") + kTaskName + L"\" /F";
-        runHiddenProcess(command);
+        RegDeleteValueW(key, kRunValueName);
     }
+
+    RegCloseKey(key);
 }
 
 void updateTrayTip()
@@ -740,103 +726,13 @@ void showEditor(HWND owner)
     SetForegroundWindow(owner);
 }
 
-struct LogState
+void openLog(HWND owner)
 {
-    HWND title = nullptr;
-    HWND edit = nullptr;
-};
-
-void resizeLog(HWND hwnd, LogState* state)
-{
-    RECT rect{};
-    GetClientRect(hwnd, &rect);
-    const int margin = scale(22);
-    const int buttonY = rect.bottom - scale(52);
-    MoveWindow(state->title, margin, scale(18), rect.right - margin * 2, scale(28), TRUE);
-    MoveWindow(state->edit, margin, scale(58), rect.right - margin * 2, buttonY - scale(72), TRUE);
-    MoveWindow(GetDlgItem(hwnd, kIdRefreshLog), margin, buttonY, scale(92), scale(32), TRUE);
-    MoveWindow(GetDlgItem(hwnd, kIdClose), rect.right - scale(94), buttonY, scale(78), scale(32), TRUE);
-}
-
-LRESULT CALLBACK logProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam)
-{
-    auto* state = reinterpret_cast<LogState*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
-    switch (msg)
-    {
-    case WM_NCCREATE:
-        SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(
-            reinterpret_cast<CREATESTRUCTW*>(lparam)->lpCreateParams));
-        return TRUE;
-    case WM_CREATE:
-        state = reinterpret_cast<LogState*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
-        state->title = CreateWindowW(L"STATIC", L"Recent events", WS_CHILD | WS_VISIBLE,
-            0, 0, 0, 0, hwnd, nullptr, g_instance, nullptr);
-        setFont(state->title, g_titleFont);
-        state->edit = CreateWindowExW(0, L"EDIT", readTextFile(g_logPath).c_str(),
-            WS_CHILD | WS_VISIBLE | WS_VSCROLL | WS_BORDER | ES_LEFT | ES_MULTILINE | ES_AUTOVSCROLL | ES_READONLY,
-            0, 0, 0, 0, hwnd, nullptr, g_instance, nullptr);
-        setFont(state->edit);
-        createButton(hwnd, kIdRefreshLog, L"Refresh");
-        createButton(hwnd, kIdClose, L"Close", BS_DEFPUSHBUTTON);
-        resizeLog(hwnd, state);
-        return 0;
-    case WM_SIZE:
-        if (state && state->edit)
-            resizeLog(hwnd, state);
-        return 0;
-    case WM_COMMAND:
-        if (LOWORD(wparam) == kIdRefreshLog && state && state->edit)
-        {
-            const std::wstring text = readTextFile(g_logPath);
-            SetWindowTextW(state->edit, text.c_str());
-        }
-        else if (LOWORD(wparam) == kIdClose)
-            DestroyWindow(hwnd);
-        return 0;
-    case WM_CLOSE:
-        DestroyWindow(hwnd);
-        return 0;
-    case WM_CTLCOLORSTATIC:
-    {
-        HDC dc = reinterpret_cast<HDC>(wparam);
-        SetBkMode(dc, TRANSPARENT);
-        SetTextColor(dc, g_textColor);
-        return reinterpret_cast<LRESULT>(g_windowBrush);
-    }
-    case WM_CTLCOLOREDIT:
-    {
-        HDC dc = reinterpret_cast<HDC>(wparam);
-        SetTextColor(dc, g_textColor);
-        SetBkColor(dc, g_fieldColor);
-        return reinterpret_cast<LRESULT>(g_fieldBrush);
-    }
-    }
-    return DefWindowProcW(hwnd, msg, wparam, lparam);
-}
-
-void showLog(HWND owner)
-{
-    LogState state{};
-    HWND hwnd = CreateWindowExW(WS_EX_DLGMODALFRAME, kLogClass, L"Log",
-        WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_THICKFRAME,
-        CW_USEDEFAULT, CW_USEDEFAULT, scale(620), scale(460),
-        owner, nullptr, g_instance, &state);
-    if (!hwnd)
-        return;
-
-    EnableWindow(owner, FALSE);
-    ShowWindow(hwnd, SW_SHOW);
-    MSG msg{};
-    while (IsWindow(hwnd) && GetMessageW(&msg, nullptr, 0, 0))
-    {
-        if (!IsDialogMessageW(hwnd, &msg))
-        {
-            TranslateMessage(&msg);
-            DispatchMessageW(&msg);
-        }
-    }
-    EnableWindow(owner, TRUE);
-    SetForegroundWindow(owner);
+    ensureDefaultFiles();
+    HINSTANCE result = ShellExecuteW(owner, L"open", g_logPath.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+    std::wstring quotedLogPath = L"\"" + g_logPath + L"\"";
+    if (reinterpret_cast<INT_PTR>(result) <= 32)
+        ShellExecuteW(owner, L"open", L"notepad.exe", quotedLogPath.c_str(), nullptr, SW_SHOWNORMAL);
 }
 
 void showTrayMenu(HWND hwnd)
@@ -853,7 +749,7 @@ void showTrayMenu(HWND hwnd)
     AppendMenuW(menu, MF_STRING | MF_DISABLED | (g_paused ? 0 : MF_CHECKED), 0, status.c_str());
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(menu, MF_STRING, kIdEditWhitelist, L"Edit Whitelist...");
-    AppendMenuW(menu, MF_STRING, kIdViewLog, L"View Log...");
+    AppendMenuW(menu, MF_STRING, kIdViewLog, L"Open Log...");
     AppendMenuW(menu, MF_STRING | (g_paused ? MF_CHECKED : 0), kIdPauseWatching, L"Pause Watching");
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(menu, MF_STRING | (startWithWindowsEnabled() ? MF_CHECKED : 0), kIdStartWithWindows, L"Start with Windows");
@@ -898,7 +794,7 @@ LRESULT CALLBACK windowProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam)
             showEditor(hwnd);
             return 0;
         case kIdViewLog:
-            showLog(hwnd);
+            openLog(hwnd);
             return 0;
         case kIdPauseWatching:
             g_paused = !g_paused.load();
@@ -944,14 +840,7 @@ bool registerClasses()
     if (!RegisterClassW(&wc))
         return false;
 
-    wc = {};
-    wc.lpfnWndProc = logProc;
-    wc.hInstance = g_instance;
-    wc.lpszClassName = kLogClass;
-    wc.hIcon = g_appIcon;
-    wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
-    wc.hbrBackground = g_windowBrush;
-    return RegisterClassW(&wc) != 0;
+    return true;
 }
 
 void initPaths()

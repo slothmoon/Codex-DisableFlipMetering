@@ -29,7 +29,7 @@ FlipConfigBypass.log
 Right-click the tray icon to:
 
 - edit the whitelist
-- view the log
+- open the log in your default editor
 - pause watching
 - toggle Start with Windows
 - exit
@@ -42,6 +42,8 @@ C:\Games\Cyberpunk 2077\bin\x64\Cyberpunk2077.exe
 ```
 
 The log only records meaningful events, such as successful injections and failures like access denied or architecture mismatch.
+
+`Start with Windows` uses the current user's `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` registry key. It does not install a service and should not require administrator permission.
 
 ## Notes
 
