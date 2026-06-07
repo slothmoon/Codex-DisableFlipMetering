@@ -46,6 +46,11 @@ std::wstring g_payloadPath;
 std::wstring g_whitelistPath;
 std::wstring g_logPath;
 
+HMENU menuId(UINT id)
+{
+    return reinterpret_cast<HMENU>(static_cast<UINT_PTR>(id));
+}
+
 std::wstring toLower(std::wstring value)
 {
     for (wchar_t& ch : value)
@@ -492,9 +497,9 @@ LRESULT CALLBACK editorProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam)
         state->edit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", readTextFile(g_whitelistPath).c_str(),
             WS_CHILD | WS_VISIBLE | WS_VSCROLL | ES_LEFT | ES_MULTILINE | ES_AUTOVSCROLL | ES_WANTRETURN,
             0, 0, 0, 0, hwnd, nullptr, g_instance, nullptr);
-        CreateWindowW(L"BUTTON", L"Add EXE...", WS_CHILD | WS_VISIBLE, 0, 0, 0, 0, hwnd, reinterpret_cast<HMENU>(kIdAddExe), g_instance, nullptr);
-        CreateWindowW(L"BUTTON", L"Save", WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON, 0, 0, 0, 0, hwnd, reinterpret_cast<HMENU>(kIdSave), g_instance, nullptr);
-        CreateWindowW(L"BUTTON", L"Cancel", WS_CHILD | WS_VISIBLE, 0, 0, 0, 0, hwnd, reinterpret_cast<HMENU>(kIdCancel), g_instance, nullptr);
+        CreateWindowW(L"BUTTON", L"Add EXE...", WS_CHILD | WS_VISIBLE, 0, 0, 0, 0, hwnd, menuId(kIdAddExe), g_instance, nullptr);
+        CreateWindowW(L"BUTTON", L"Save", WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON, 0, 0, 0, 0, hwnd, menuId(kIdSave), g_instance, nullptr);
+        CreateWindowW(L"BUTTON", L"Cancel", WS_CHILD | WS_VISIBLE, 0, 0, 0, 0, hwnd, menuId(kIdCancel), g_instance, nullptr);
         resizeEditor(hwnd, state);
         return 0;
     case WM_SIZE:
@@ -576,7 +581,7 @@ LRESULT CALLBACK logProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam)
             WS_CHILD | WS_VISIBLE | WS_VSCROLL | ES_LEFT | ES_MULTILINE | ES_AUTOVSCROLL | ES_READONLY,
             10, 10, 560, 320, hwnd, nullptr, g_instance, nullptr);
         CreateWindowW(L"BUTTON", L"Close", WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON,
-            495, 340, 75, 28, hwnd, reinterpret_cast<HMENU>(kIdClose), g_instance, nullptr);
+            495, 340, 75, 28, hwnd, menuId(kIdClose), g_instance, nullptr);
         return 0;
     case WM_SIZE:
     {

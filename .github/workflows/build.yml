@@ -23,8 +23,10 @@ jobs:
           mkdir bin\Release
           mkdir obj\app
           mkdir obj\payload
-          cl /nologo /std:c++17 /O2 /MT /EHsc /DWIN32_LEAN_AND_MEAN /DNOMINMAX /Fo"obj\app\\" /Fe"bin\Release\FlipConfigBypass.exe" src\app\main.cpp /link /SUBSYSTEM:WINDOWS user32.lib shell32.lib comdlg32.lib
-          cl /nologo /std:c++17 /O2 /MT /EHsc /LD /DWIN32_LEAN_AND_MEAN /DNOMINMAX /Fo"obj\payload\\" /Fe"bin\Release\FlipConfigPayload.dll" src\payload\payload.cpp /link /SUBSYSTEM:WINDOWS
+          cl /nologo /std:c++17 /O2 /MT /EHsc /DUNICODE /D_UNICODE /DWIN32_LEAN_AND_MEAN /DNOMINMAX /Fo"obj\app\\" /Fe"bin\Release\FlipConfigBypass.exe" src\app\main.cpp /link /SUBSYSTEM:WINDOWS user32.lib shell32.lib comdlg32.lib
+          if errorlevel 1 exit /b 1
+          cl /nologo /std:c++17 /O2 /MT /EHsc /LD /DUNICODE /D_UNICODE /DWIN32_LEAN_AND_MEAN /DNOMINMAX /Fo"obj\payload\\" /Fe"bin\Release\FlipConfigPayload.dll" src\payload\payload.cpp /link /SUBSYSTEM:WINDOWS
+          if errorlevel 1 exit /b 1
           dir bin\Release
           if not exist bin\Release\FlipConfigBypass.exe exit /b 1
           if not exist bin\Release\FlipConfigPayload.dll exit /b 1
