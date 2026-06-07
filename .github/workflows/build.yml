@@ -37,5 +37,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: FlipConfigBypass-x64
-          path: bin\Release
+          path: |
+            bin\Release\FlipConfigBypass.exe
+            bin\Release\FlipConfigPayload.dll
           if-no-files-found: error
