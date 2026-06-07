@@ -1,0 +1,4 @@
+#include "resource.h"
+
+IDI_APP ICON "src\\app\\resources\\app.ico"
+

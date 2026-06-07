@@ -14,6 +14,8 @@
 #include <unordered_set>
 #include <vector>
 
+#include "resource.h"
+
 namespace
 {
 constexpr UINT kTrayMessage = WM_APP + 1;
@@ -60,57 +62,6 @@ COLORREF g_fieldColor = RGB(255, 255, 255);
 HMENU menuId(UINT id)
 {
     return reinterpret_cast<HMENU>(static_cast<UINT_PTR>(id));
-}
-
-HICON createAppIcon()
-{
-    HDC screen = GetDC(nullptr);
-    HDC colorDc = CreateCompatibleDC(screen);
-    HDC maskDc = CreateCompatibleDC(screen);
-    HBITMAP color = CreateCompatibleBitmap(screen, 32, 32);
-    HBITMAP mask = CreateBitmap(32, 32, 1, 1, nullptr);
-    HGDIOBJ oldColor = SelectObject(colorDc, color);
-    HGDIOBJ oldMask = SelectObject(maskDc, mask);
-
-    HBRUSH bg = CreateSolidBrush(RGB(18, 24, 33));
-    RECT all{ 0, 0, 32, 32 };
-    FillRect(colorDc, &all, bg);
-    DeleteObject(bg);
-
-    HBRUSH accent = CreateSolidBrush(RGB(68, 215, 182));
-    HBRUSH panel = CreateSolidBrush(RGB(236, 244, 242));
-    HPEN edge = CreatePen(PS_SOLID, 1, RGB(90, 113, 128));
-    HGDIOBJ oldPen = SelectObject(colorDc, edge);
-
-    RECT panelRect{ 7, 8, 25, 24 };
-    FillRect(colorDc, &panelRect, panel);
-    Rectangle(colorDc, panelRect.left, panelRect.top, panelRect.right, panelRect.bottom);
-    RECT accentRect{ 10, 11, 17, 21 };
-    FillRect(colorDc, &accentRect, accent);
-    MoveToEx(colorDc, 20, 11, nullptr);
-    LineTo(colorDc, 23, 16);
-    LineTo(colorDc, 20, 21);
-
-    FillRect(maskDc, &all, reinterpret_cast<HBRUSH>(GetStockObject(BLACK_BRUSH)));
-
-    SelectObject(colorDc, oldPen);
-    SelectObject(colorDc, oldColor);
-    SelectObject(maskDc, oldMask);
-    DeleteObject(edge);
-    DeleteObject(panel);
-    DeleteObject(accent);
-    DeleteDC(colorDc);
-    DeleteDC(maskDc);
-    ReleaseDC(nullptr, screen);
-
-    ICONINFO info{};
-    info.fIcon = TRUE;
-    info.hbmColor = color;
-    info.hbmMask = mask;
-    HICON icon = CreateIconIndirect(&info);
-    DeleteObject(color);
-    DeleteObject(mask);
-    return icon;
 }
 
 void initFonts()
@@ -944,7 +895,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int)
     initFonts();
     g_windowBrush = CreateSolidBrush(g_windowColor);
     g_fieldBrush = CreateSolidBrush(g_fieldColor);
-    g_appIcon = createAppIcon();
+    g_appIcon = reinterpret_cast<HICON>(LoadImageW(g_instance, MAKEINTRESOURCEW(IDI_APP), IMAGE_ICON, 32, 32, LR_DEFAULTCOLOR));
     g_ownsAppIcon = g_appIcon != nullptr;
     if (!g_appIcon)
         g_appIcon = LoadIconW(nullptr, IDI_APPLICATION);
