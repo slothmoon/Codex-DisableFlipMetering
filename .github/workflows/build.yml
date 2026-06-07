@@ -1,4 +1,4 @@
-name: Build DLL
+name: Build
 
 on:
   workflow_dispatch:
@@ -21,11 +21,14 @@ jobs:
           for /f "usebackq tokens=*" %%i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath`) do set VSINSTALL=%%i
           call "%VSINSTALL%\VC\Auxiliary\Build\vcvars64.bat"
           mkdir bin\Release
-          cl /nologo /std:c++17 /O2 /MT /EHsc /LD /DWIN32_LEAN_AND_MEAN /DNOMINMAX src\dllmain.cpp /link /OUT:bin\Release\dxgi.dll /SUBSYSTEM:WINDOWS
+          cl /nologo /std:c++17 /O2 /MT /EHsc /DWIN32_LEAN_AND_MEAN /DNOMINMAX src\app\main.cpp /Fe:bin\Release\FlipConfigBypass.exe /link /SUBSYSTEM:WINDOWS user32.lib shell32.lib comdlg32.lib
+          cl /nologo /std:c++17 /O2 /MT /EHsc /LD /DWIN32_LEAN_AND_MEAN /DNOMINMAX src\payload\payload.cpp /Fe:bin\Release\FlipConfigPayload.dll /link /SUBSYSTEM:WINDOWS
 
-      - name: Upload dxgi.dll
+      - name: Upload build
         uses: actions/upload-artifact@v4
         with:
-          name: DisableFlipMetering-dxgi
-          path: bin\Release\dxgi.dll
+          name: FlipConfigBypass-x64
+          path: |
+            bin\Release\FlipConfigBypass.exe
+            bin\Release\FlipConfigPayload.dll
           if-no-files-found: error

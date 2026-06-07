@@ -1,36 +1,55 @@
-# DisableFlipMetering
+# Flip Config Bypass
 
-Tiny `dxgi.dll` proxy that forwards DXGI to the real Windows DLL and intercepts `nvapi_QueryInterface`.
+Small Windows tray utility that watches a user whitelist and injects a tiny x64 payload into matching processes. The payload hides `NvAPI_D3D12_SetFlipConfig` by returning `nullptr` when the game asks `nvapi_QueryInterface` for interface ID `0xF3148C42`.
 
-When the game asks NVAPI for `NvAPI_D3D12_SetFlipConfig`, the proxy returns `nullptr`. This matches the behavior of the larger projects that disable NVIDIA flip metering by hiding that NVAPI entry point.
+This replaces the older `dxgi.dll` proxy approach. There is no fake DXGI DLL to copy next to a game executable.
 
 ## Build
 
-GitHub Actions builds the DLL directly with the Visual C++ compiler on a Windows runner. Open the repo's **Actions** tab, run **Build DLL**, then download the `DisableFlipMetering-dxgi` artifact.
+The project is intended to build directly on GitHub Actions. Open the repo's **Actions** tab, run **Build**, then download the `FlipConfigBypass-x64` artifact.
 
-The DLL will be here:
+The artifact contains:
 
 ```text
-bin\Release\dxgi.dll
+FlipConfigBypass.exe
+FlipConfigPayload.dll
 ```
+
+Keep both files in the same folder.
 
 ## Use
 
-Copy `dxgi.dll` next to the game's `.exe`.
+Run `FlipConfigBypass.exe`. It creates these files beside the EXE if they do not already exist:
 
-If the game does not load `dxgi.dll`, try the loader name the game already probes. The usual name is `dxgi.dll`; `dxig.dll` is normally a typo unless the game specifically loads that filename.
+```text
+whitelist.txt
+FlipConfigBypass.log
+```
 
-No config file is needed. The DLL hardcodes `NvAPI_D3D12_SetFlipConfig` as `0xF3148C42`.
+Right-click the tray icon to:
+
+- edit the whitelist
+- view the log
+- pause watching
+- toggle Start with Windows
+- exit
+
+Whitelist entries can be either executable names or full paths:
+
+```text
+GTA5.exe
+C:\Games\Cyberpunk 2077\bin\x64\Cyberpunk2077.exe
+```
+
+The log only records meaningful events, such as successful injections and failures like access denied or architecture mismatch.
 
 ## Notes
 
-This is intentionally small:
-
+- x64 targets only
 - no overlay
-- no settings UI
-- no graphics hooks
-- no MinHook dependency
+- no settings UI beyond the whitelist editor
 - no NVIDIA SDK dependency
-- no config or log file
+- no external hook library
+- no attempt to bypass anti-cheat or protected process restrictions
 
-Some games, especially multiplayer games with anti-cheat, may block local DLL proxy loading or treat it as unsupported.
+Some games, especially multiplayer games with anti-cheat, may block injection or treat it as unsupported.
