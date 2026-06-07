@@ -2,12 +2,9 @@
 #include <tlhelp32.h>
 
 #include <atomic>
+#include <cwchar>
 #include <cstdint>
 #include <cstring>
-#include <cwctype>
-#include <mutex>
-#include <string>
-#include <unordered_set>
 
 #include "../shared/flip_config.h"
 
@@ -19,33 +16,32 @@ namespace
 std::atomic<NvApiQueryInterface> g_realNvApiQueryInterface{ nullptr };
 std::atomic<GetProcAddressFn> g_realGetProcAddress{ ::GetProcAddress };
 std::atomic<bool> g_running{ true };
-std::mutex g_scanMutex;
-std::unordered_set<HMODULE> g_scannedModules;
-
-std::wstring toLower(std::wstring value)
-{
-    for (wchar_t& ch : value)
-        ch = static_cast<wchar_t>(std::towlower(ch));
-    return value;
-}
-
-std::wstring moduleBaseName(HMODULE module)
-{
-    wchar_t path[MAX_PATH]{};
-    if (!GetModuleFileNameW(module, path, MAX_PATH))
-        return {};
-
-    std::wstring name(path);
-    const size_t slash = name.find_last_of(L"\\/");
-    if (slash != std::wstring::npos)
-        name.erase(0, slash + 1);
-    return toLower(name);
-}
+HMODULE g_scannedModules[512]{};
+unsigned int g_scannedModuleCount = 0;
 
 bool isNvApiModule(HMODULE module)
 {
-    const std::wstring name = moduleBaseName(module);
-    return name == L"nvapi64.dll" || name == L"nvapi.dll";
+    wchar_t path[MAX_PATH]{};
+    if (!GetModuleFileNameW(module, path, MAX_PATH))
+        return false;
+
+    const wchar_t* name = wcsrchr(path, L'\\');
+    name = name ? name + 1 : path;
+    return _wcsicmp(name, L"nvapi64.dll") == 0 || _wcsicmp(name, L"nvapi.dll") == 0;
+}
+
+bool rememberModule(HMODULE module)
+{
+    for (unsigned int i = 0; i < g_scannedModuleCount; ++i)
+    {
+        if (g_scannedModules[i] == module)
+            return false;
+    }
+
+    if (g_scannedModuleCount < static_cast<unsigned int>(sizeof(g_scannedModules) / sizeof(g_scannedModules[0])))
+        g_scannedModules[g_scannedModuleCount++] = module;
+
+    return true;
 }
 
 void* __cdecl hookedNvApiQueryInterface(unsigned int interfaceId)
@@ -143,8 +139,7 @@ void patchModuleImports(HMODULE module)
     void* originalGetProc = nullptr;
     const char* loaderModules[] = {
         "KERNEL32.dll",
-        "KERNELBASE.dll",
-        "api-ms-win-core-libraryloader-l1-2-0.dll"
+        "KERNELBASE.dll"
     };
 
     for (const char* loaderModule : loaderModules)
@@ -169,7 +164,6 @@ void scanAndPatchImports()
     if (snapshot == INVALID_HANDLE_VALUE)
         return;
 
-    std::lock_guard<std::mutex> lock(g_scanMutex);
     MODULEENTRY32W entry{};
     entry.dwSize = sizeof(entry);
     if (Module32FirstW(snapshot, &entry))
@@ -177,7 +171,7 @@ void scanAndPatchImports()
         do
         {
             HMODULE module = reinterpret_cast<HMODULE>(entry.modBaseAddr);
-            if (g_scannedModules.insert(module).second)
+            if (rememberModule(module))
                 patchModuleImports(module);
         } while (Module32NextW(snapshot, &entry));
     }

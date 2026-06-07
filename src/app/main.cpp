@@ -26,6 +26,8 @@ constexpr UINT kIdSave = 2001;
 constexpr UINT kIdCancel = 2002;
 constexpr UINT kIdAddExe = 2003;
 constexpr UINT kIdClose = 2004;
+constexpr UINT kIdRemoveExe = 2005;
+constexpr UINT kIdRefreshLog = 2006;
 constexpr wchar_t kWindowClass[] = L"FlipConfigBypassTray";
 constexpr wchar_t kEditorClass[] = L"FlipConfigBypassEditor";
 constexpr wchar_t kLogClass[] = L"FlipConfigBypassLog";
@@ -45,10 +47,87 @@ std::wstring g_exeDir;
 std::wstring g_payloadPath;
 std::wstring g_whitelistPath;
 std::wstring g_logPath;
+HFONT g_uiFont = nullptr;
+HFONT g_titleFont = nullptr;
+HICON g_appIcon = nullptr;
+bool g_ownsAppIcon = false;
 
 HMENU menuId(UINT id)
 {
     return reinterpret_cast<HMENU>(static_cast<UINT_PTR>(id));
+}
+
+HICON createAppIcon()
+{
+    HDC screen = GetDC(nullptr);
+    HDC colorDc = CreateCompatibleDC(screen);
+    HDC maskDc = CreateCompatibleDC(screen);
+    HBITMAP color = CreateCompatibleBitmap(screen, 32, 32);
+    HBITMAP mask = CreateBitmap(32, 32, 1, 1, nullptr);
+    HGDIOBJ oldColor = SelectObject(colorDc, color);
+    HGDIOBJ oldMask = SelectObject(maskDc, mask);
+
+    HBRUSH bg = CreateSolidBrush(RGB(18, 24, 33));
+    RECT all{ 0, 0, 32, 32 };
+    FillRect(colorDc, &all, bg);
+    DeleteObject(bg);
+
+    HBRUSH accent = CreateSolidBrush(RGB(68, 215, 182));
+    HBRUSH panel = CreateSolidBrush(RGB(236, 244, 242));
+    HPEN edge = CreatePen(PS_SOLID, 1, RGB(90, 113, 128));
+    HGDIOBJ oldPen = SelectObject(colorDc, edge);
+
+    RECT panelRect{ 7, 8, 25, 24 };
+    FillRect(colorDc, &panelRect, panel);
+    Rectangle(colorDc, panelRect.left, panelRect.top, panelRect.right, panelRect.bottom);
+    RECT accentRect{ 10, 11, 17, 21 };
+    FillRect(colorDc, &accentRect, accent);
+    MoveToEx(colorDc, 20, 11, nullptr);
+    LineTo(colorDc, 23, 16);
+    LineTo(colorDc, 20, 21);
+
+    FillRect(maskDc, &all, reinterpret_cast<HBRUSH>(GetStockObject(BLACK_BRUSH)));
+
+    SelectObject(colorDc, oldPen);
+    SelectObject(colorDc, oldColor);
+    SelectObject(maskDc, oldMask);
+    DeleteObject(edge);
+    DeleteObject(panel);
+    DeleteObject(accent);
+    DeleteDC(colorDc);
+    DeleteDC(maskDc);
+    ReleaseDC(nullptr, screen);
+
+    ICONINFO info{};
+    info.fIcon = TRUE;
+    info.hbmColor = color;
+    info.hbmMask = mask;
+    HICON icon = CreateIconIndirect(&info);
+    DeleteObject(color);
+    DeleteObject(mask);
+    return icon;
+}
+
+void initFonts()
+{
+    g_uiFont = CreateFontW(-16, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
+        OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
+    g_titleFont = CreateFontW(-20, 0, 0, 0, 600, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
+        OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
+}
+
+void setFont(HWND hwnd, HFONT font = g_uiFont)
+{
+    if (hwnd && font)
+        SendMessageW(hwnd, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
+}
+
+HWND createButton(HWND parent, UINT id, const wchar_t* text, DWORD style = 0)
+{
+    HWND button = CreateWindowW(L"BUTTON", text, WS_CHILD | WS_VISIBLE | style,
+        0, 0, 0, 0, parent, menuId(id), g_instance, nullptr);
+    setFont(button);
+    return button;
 }
 
 std::wstring toLower(std::wstring value)
@@ -316,7 +395,7 @@ bool injectPayload(DWORD pid, const std::wstring& exeName)
     }
 
     HANDLE process = OpenProcess(
-        PROCESS_CREATE_THREAD | PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_VM_OPERATION | PROCESS_VM_WRITE | PROCESS_VM_READ,
+        PROCESS_CREATE_THREAD | PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_VM_OPERATION | PROCESS_VM_WRITE,
         FALSE,
         pid);
     if (!process)
@@ -350,11 +429,13 @@ bool injectPayload(DWORD pid, const std::wstring& exeName)
         HANDLE thread = CreateRemoteThread(process, nullptr, 0, loadLibrary, remotePath, 0, nullptr);
         if (thread)
         {
-            WaitForSingleObject(thread, 10000);
+            const DWORD waitResult = WaitForSingleObject(thread, 10000);
             DWORD exitCode = 0;
             GetExitCodeThread(thread, &exitCode);
-            ok = exitCode != 0;
+            ok = waitResult == WAIT_OBJECT_0 && exitCode != 0;
             CloseHandle(thread);
+            if (!ok)
+                SetLastError(waitResult == WAIT_TIMEOUT ? WAIT_TIMEOUT : ERROR_DLL_INIT_FAILED);
         }
         else
         {
@@ -468,19 +549,52 @@ void updateTrayTip()
 
 struct EditorState
 {
-    HWND edit = nullptr;
+    HWND title = nullptr;
+    HWND list = nullptr;
+    HWND hint = nullptr;
 };
 
 void resizeEditor(HWND hwnd, EditorState* state)
 {
     RECT rect{};
     GetClientRect(hwnd, &rect);
-    const int margin = 10;
-    const int buttonY = rect.bottom - 38;
-    MoveWindow(state->edit, margin, margin, rect.right - margin * 2, buttonY - margin * 2, TRUE);
-    MoveWindow(GetDlgItem(hwnd, kIdAddExe), margin, buttonY, 90, 28, TRUE);
-    MoveWindow(GetDlgItem(hwnd, kIdSave), rect.right - 170, buttonY, 75, 28, TRUE);
-    MoveWindow(GetDlgItem(hwnd, kIdCancel), rect.right - 85, buttonY, 75, 28, TRUE);
+    const int margin = 18;
+    const int buttonY = rect.bottom - 48;
+    MoveWindow(state->title, margin, 14, rect.right - margin * 2, 28, TRUE);
+    MoveWindow(state->hint, margin, 44, rect.right - margin * 2, 24, TRUE);
+    MoveWindow(state->list, margin, 74, rect.right - margin * 2, buttonY - 86, TRUE);
+    MoveWindow(GetDlgItem(hwnd, kIdAddExe), margin, buttonY, 96, 30, TRUE);
+    MoveWindow(GetDlgItem(hwnd, kIdRemoveExe), margin + 106, buttonY, 86, 30, TRUE);
+    MoveWindow(GetDlgItem(hwnd, kIdSave), rect.right - 174, buttonY, 76, 30, TRUE);
+    MoveWindow(GetDlgItem(hwnd, kIdCancel), rect.right - 88, buttonY, 76, 30, TRUE);
+}
+
+void populateWhitelistList(HWND list)
+{
+    SendMessageW(list, LB_RESETCONTENT, 0, 0);
+    for (const std::wstring& entry : whitelistSnapshot())
+        SendMessageW(list, LB_ADDSTRING, 0, reinterpret_cast<LPARAM>(entry.c_str()));
+}
+
+void saveWhitelistList(HWND list)
+{
+    const int count = static_cast<int>(SendMessageW(list, LB_GETCOUNT, 0, 0));
+    std::wstring content;
+    for (int i = 0; i < count; ++i)
+    {
+        const int len = static_cast<int>(SendMessageW(list, LB_GETTEXTLEN, i, 0));
+        std::wstring item(len + 1, L'\0');
+        SendMessageW(list, LB_GETTEXT, i, reinterpret_cast<LPARAM>(item.data()));
+        item.resize(len);
+        if (!content.empty())
+            content += L"\r\n";
+        content += item;
+    }
+    if (!content.empty())
+        content += L"\r\n";
+
+    writeTextFile(g_whitelistPath, content);
+    loadWhitelist();
 }
 
 LRESULT CALLBACK editorProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam)
@@ -494,16 +608,25 @@ LRESULT CALLBACK editorProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam)
         return TRUE;
     case WM_CREATE:
         state = reinterpret_cast<EditorState*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
-        state->edit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", readTextFile(g_whitelistPath).c_str(),
-            WS_CHILD | WS_VISIBLE | WS_VSCROLL | ES_LEFT | ES_MULTILINE | ES_AUTOVSCROLL | ES_WANTRETURN,
+        state->title = CreateWindowW(L"STATIC", L"Whitelisted executables", WS_CHILD | WS_VISIBLE,
             0, 0, 0, 0, hwnd, nullptr, g_instance, nullptr);
-        CreateWindowW(L"BUTTON", L"Add EXE...", WS_CHILD | WS_VISIBLE, 0, 0, 0, 0, hwnd, menuId(kIdAddExe), g_instance, nullptr);
-        CreateWindowW(L"BUTTON", L"Save", WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON, 0, 0, 0, 0, hwnd, menuId(kIdSave), g_instance, nullptr);
-        CreateWindowW(L"BUTTON", L"Cancel", WS_CHILD | WS_VISIBLE, 0, 0, 0, 0, hwnd, menuId(kIdCancel), g_instance, nullptr);
+        setFont(state->title, g_titleFont);
+        state->hint = CreateWindowW(L"STATIC", L"Add executable names or full paths. Only these processes are touched.",
+            WS_CHILD | WS_VISIBLE, 0, 0, 0, 0, hwnd, nullptr, g_instance, nullptr);
+        setFont(state->hint);
+        state->list = CreateWindowExW(WS_EX_CLIENTEDGE, L"LISTBOX", nullptr,
+            WS_CHILD | WS_VISIBLE | WS_VSCROLL | LBS_NOTIFY | LBS_NOINTEGRALHEIGHT,
+            0, 0, 0, 0, hwnd, nullptr, g_instance, nullptr);
+        setFont(state->list);
+        populateWhitelistList(state->list);
+        createButton(hwnd, kIdAddExe, L"Add EXE...");
+        createButton(hwnd, kIdRemoveExe, L"Remove");
+        createButton(hwnd, kIdSave, L"Save", BS_DEFPUSHBUTTON);
+        createButton(hwnd, kIdCancel, L"Cancel");
         resizeEditor(hwnd, state);
         return 0;
     case WM_SIZE:
-        if (state && state->edit)
+        if (state && state->list)
             resizeEditor(hwnd, state);
         return 0;
     case WM_COMMAND:
@@ -518,21 +641,17 @@ LRESULT CALLBACK editorProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam)
             ofn.nMaxFile = static_cast<DWORD>(std::size(file));
             ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST;
             if (GetOpenFileNameW(&ofn))
-            {
-                const int len = GetWindowTextLengthW(state->edit);
-                SendMessageW(state->edit, EM_SETSEL, len, len);
-                std::wstring line = std::wstring(len > 0 ? L"\r\n" : L"") + file;
-                SendMessageW(state->edit, EM_REPLACESEL, TRUE, reinterpret_cast<LPARAM>(line.c_str()));
-            }
+                SendMessageW(state->list, LB_ADDSTRING, 0, reinterpret_cast<LPARAM>(file));
+        }
+        else if (LOWORD(wparam) == kIdRemoveExe)
+        {
+            const int sel = static_cast<int>(SendMessageW(state->list, LB_GETCURSEL, 0, 0));
+            if (sel != LB_ERR)
+                SendMessageW(state->list, LB_DELETESTRING, sel, 0);
         }
         else if (LOWORD(wparam) == kIdSave)
         {
-            const int len = GetWindowTextLengthW(state->edit);
-            std::wstring text(len + 1, L'\0');
-            GetWindowTextW(state->edit, text.data(), len + 1);
-            text.resize(len);
-            writeTextFile(g_whitelistPath, text);
-            loadWhitelist();
+            saveWhitelistList(state->list);
             updateTrayTip();
             DestroyWindow(hwnd);
         }
@@ -553,8 +672,10 @@ void showEditor(HWND owner)
     EditorState state{};
     HWND hwnd = CreateWindowExW(WS_EX_DLGMODALFRAME, kEditorClass, L"Edit Whitelist",
         WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_THICKFRAME,
-        CW_USEDEFAULT, CW_USEDEFAULT, 560, 420,
+        CW_USEDEFAULT, CW_USEDEFAULT, 620, 460,
         owner, nullptr, g_instance, &state);
+    if (!hwnd)
+        return;
 
     EnableWindow(owner, FALSE);
     ShowWindow(hwnd, SW_SHOW);
@@ -571,28 +692,57 @@ void showEditor(HWND owner)
     SetForegroundWindow(owner);
 }
 
+struct LogState
+{
+    HWND title = nullptr;
+    HWND edit = nullptr;
+};
+
+void resizeLog(HWND hwnd, LogState* state)
+{
+    RECT rect{};
+    GetClientRect(hwnd, &rect);
+    const int margin = 18;
+    const int buttonY = rect.bottom - 48;
+    MoveWindow(state->title, margin, 14, rect.right - margin * 2, 28, TRUE);
+    MoveWindow(state->edit, margin, 52, rect.right - margin * 2, buttonY - 64, TRUE);
+    MoveWindow(GetDlgItem(hwnd, kIdRefreshLog), margin, buttonY, 86, 30, TRUE);
+    MoveWindow(GetDlgItem(hwnd, kIdClose), rect.right - 88, buttonY, 76, 30, TRUE);
+}
+
 LRESULT CALLBACK logProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam)
 {
-    static HWND edit = nullptr;
+    auto* state = reinterpret_cast<LogState*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
     switch (msg)
     {
+    case WM_NCCREATE:
+        SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(
+            reinterpret_cast<CREATESTRUCTW*>(lparam)->lpCreateParams));
+        return TRUE;
     case WM_CREATE:
-        edit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", readTextFile(g_logPath).c_str(),
+        state = reinterpret_cast<LogState*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+        state->title = CreateWindowW(L"STATIC", L"Recent events", WS_CHILD | WS_VISIBLE,
+            0, 0, 0, 0, hwnd, nullptr, g_instance, nullptr);
+        setFont(state->title, g_titleFont);
+        state->edit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", readTextFile(g_logPath).c_str(),
             WS_CHILD | WS_VISIBLE | WS_VSCROLL | ES_LEFT | ES_MULTILINE | ES_AUTOVSCROLL | ES_READONLY,
-            10, 10, 560, 320, hwnd, nullptr, g_instance, nullptr);
-        CreateWindowW(L"BUTTON", L"Close", WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON,
-            495, 340, 75, 28, hwnd, menuId(kIdClose), g_instance, nullptr);
+            0, 0, 0, 0, hwnd, nullptr, g_instance, nullptr);
+        setFont(state->edit);
+        createButton(hwnd, kIdRefreshLog, L"Refresh");
+        createButton(hwnd, kIdClose, L"Close", BS_DEFPUSHBUTTON);
+        resizeLog(hwnd, state);
         return 0;
     case WM_SIZE:
-    {
-        RECT rect{};
-        GetClientRect(hwnd, &rect);
-        MoveWindow(edit, 10, 10, rect.right - 20, rect.bottom - 52, TRUE);
-        MoveWindow(GetDlgItem(hwnd, kIdClose), rect.right - 85, rect.bottom - 38, 75, 28, TRUE);
+        if (state && state->edit)
+            resizeLog(hwnd, state);
         return 0;
-    }
     case WM_COMMAND:
-        if (LOWORD(wparam) == kIdClose)
+        if (LOWORD(wparam) == kIdRefreshLog && state && state->edit)
+        {
+            const std::wstring text = readTextFile(g_logPath);
+            SetWindowTextW(state->edit, text.c_str());
+        }
+        else if (LOWORD(wparam) == kIdClose)
             DestroyWindow(hwnd);
         return 0;
     case WM_CLOSE:
@@ -604,10 +754,13 @@ LRESULT CALLBACK logProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam)
 
 void showLog(HWND owner)
 {
+    LogState state{};
     HWND hwnd = CreateWindowExW(WS_EX_DLGMODALFRAME, kLogClass, L"Log",
         WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_THICKFRAME,
-        CW_USEDEFAULT, CW_USEDEFAULT, 600, 420,
-        owner, nullptr, g_instance, nullptr);
+        CW_USEDEFAULT, CW_USEDEFAULT, 620, 460,
+        owner, nullptr, g_instance, &state);
+    if (!hwnd)
+        return;
 
     EnableWindow(owner, FALSE);
     ShowWindow(hwnd, SW_SHOW);
@@ -657,7 +810,7 @@ void addTrayIcon(HWND hwnd)
     g_tray.uID = 1;
     g_tray.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
     g_tray.uCallbackMessage = kTrayMessage;
-    g_tray.hIcon = LoadIconW(nullptr, IDI_APPLICATION);
+    g_tray.hIcon = g_appIcon;
     wcsncpy_s(g_tray.szTip, L"Flip Config Bypass", _TRUNCATE);
     Shell_NotifyIconW(NIM_ADD, &g_tray);
     updateTrayTip();
@@ -713,7 +866,9 @@ bool registerClasses()
     wc.lpfnWndProc = windowProc;
     wc.hInstance = g_instance;
     wc.lpszClassName = kWindowClass;
-    wc.hIcon = LoadIconW(nullptr, IDI_APPLICATION);
+    wc.hIcon = g_appIcon;
+    wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+    wc.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
     if (!RegisterClassW(&wc))
         return false;
 
@@ -721,8 +876,9 @@ bool registerClasses()
     wc.lpfnWndProc = editorProc;
     wc.hInstance = g_instance;
     wc.lpszClassName = kEditorClass;
-    wc.hIcon = LoadIconW(nullptr, IDI_APPLICATION);
+    wc.hIcon = g_appIcon;
     wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+    wc.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
     if (!RegisterClassW(&wc))
         return false;
 
@@ -730,8 +886,9 @@ bool registerClasses()
     wc.lpfnWndProc = logProc;
     wc.hInstance = g_instance;
     wc.lpszClassName = kLogClass;
-    wc.hIcon = LoadIconW(nullptr, IDI_APPLICATION);
+    wc.hIcon = g_appIcon;
     wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+    wc.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
     return RegisterClassW(&wc) != 0;
 }
 
@@ -751,6 +908,11 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int)
 {
     g_instance = instance;
     initPaths();
+    initFonts();
+    g_appIcon = createAppIcon();
+    g_ownsAppIcon = g_appIcon != nullptr;
+    if (!g_appIcon)
+        g_appIcon = LoadIconW(nullptr, IDI_APPLICATION);
     ensureDefaultFiles();
     loadWhitelist();
 
@@ -776,6 +938,13 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int)
     g_running = false;
     if (g_watcherThread.joinable())
         g_watcherThread.join();
+
+    if (g_appIcon && g_ownsAppIcon)
+        DestroyIcon(g_appIcon);
+    if (g_uiFont)
+        DeleteObject(g_uiFont);
+    if (g_titleFont)
+        DeleteObject(g_titleFont);
 
     return 0;
 }
