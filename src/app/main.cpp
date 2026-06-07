@@ -430,7 +430,14 @@ bool injectPayload(DWORD pid, const std::wstring& exeName)
     }
 
     bool isWow64 = false;
-    if (isWow64ProcessCompat(process, isWow64) && isWow64)
+    if (!isWow64ProcessCompat(process, isWow64))
+    {
+        CloseHandle(process);
+        appendLog(exeName + L" (PID " + std::to_wstring(pid) + L") - failed, could not verify architecture");
+        return false;
+    }
+
+    if (isWow64)
     {
         CloseHandle(process);
         appendLog(exeName + L" (PID " + std::to_wstring(pid) + L") - failed, payload architecture mismatch");

@@ -38,10 +38,39 @@ bool rememberModule(HMODULE module)
             return false;
     }
 
-    if (g_scannedModuleCount < static_cast<unsigned int>(sizeof(g_scannedModules) / sizeof(g_scannedModules[0])))
-        g_scannedModules[g_scannedModuleCount++] = module;
+    if (g_scannedModuleCount >= static_cast<unsigned int>(sizeof(g_scannedModules) / sizeof(g_scannedModules[0])))
+        return false;
+
+    g_scannedModules[g_scannedModuleCount++] = module;
 
     return true;
+}
+
+void seedRealNvApiQueryInterface()
+{
+    if (g_realNvApiQueryInterface.load(std::memory_order_acquire))
+        return;
+
+    GetProcAddressFn realGetProcAddress = g_realGetProcAddress.load(std::memory_order_acquire);
+    const wchar_t* nvApiModules[] = {
+        L"nvapi64.dll",
+        L"nvapi.dll"
+    };
+
+    for (const wchar_t* moduleName : nvApiModules)
+    {
+        HMODULE module = GetModuleHandleW(moduleName);
+        if (!module)
+            continue;
+
+        auto queryInterface = reinterpret_cast<NvApiQueryInterface>(
+            realGetProcAddress(module, "nvapi_QueryInterface"));
+        if (queryInterface)
+        {
+            g_realNvApiQueryInterface.store(queryInterface, std::memory_order_release);
+            return;
+        }
+    }
 }
 
 void* __cdecl hookedNvApiQueryInterface(unsigned int interfaceId)
@@ -160,6 +189,8 @@ void patchModuleImports(HMODULE module)
 
 void scanAndPatchImports()
 {
+    seedRealNvApiQueryInterface();
+
     HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, GetCurrentProcessId());
     if (snapshot == INVALID_HANDLE_VALUE)
         return;
@@ -181,6 +212,8 @@ void scanAndPatchImports()
 
 DWORD WINAPI workerThread(void*)
 {
+    seedRealNvApiQueryInterface();
+
     for (int i = 0; g_running && i < 600; ++i)
     {
         scanAndPatchImports();
