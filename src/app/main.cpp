@@ -49,6 +49,7 @@ HINSTANCE g_instance = nullptr;
 HWND g_window = nullptr;
 NOTIFYICONDATAW g_tray{};
 HANDLE g_instanceMutex = nullptr;
+UINT g_taskbarCreatedMessage = 0;
 std::atomic<bool> g_running{ true };
 std::atomic<bool> g_paused{ false };
 std::thread g_watcherThread;
@@ -489,6 +490,7 @@ bool injectPayload(DWORD pid, const std::wstring& exeName)
     }
 
     bool ok = WriteProcessMemory(process, remotePath, g_payloadPath.c_str(), bytes, nullptr) == TRUE;
+    bool remoteThreadTimedOut = false;
     if (ok)
     {
         auto loadLibrary = reinterpret_cast<LPTHREAD_START_ROUTINE>(
@@ -500,9 +502,10 @@ bool injectPayload(DWORD pid, const std::wstring& exeName)
             DWORD exitCode = 0;
             GetExitCodeThread(thread, &exitCode);
             ok = waitResult == WAIT_OBJECT_0 && exitCode != 0;
+            remoteThreadTimedOut = waitResult == WAIT_TIMEOUT;
             CloseHandle(thread);
             if (!ok)
-                SetLastError(waitResult == WAIT_TIMEOUT ? WAIT_TIMEOUT : ERROR_DLL_INIT_FAILED);
+                SetLastError(remoteThreadTimedOut ? WAIT_TIMEOUT : ERROR_DLL_INIT_FAILED);
         }
         else
         {
@@ -511,7 +514,8 @@ bool injectPayload(DWORD pid, const std::wstring& exeName)
     }
 
     const DWORD error = ok ? ERROR_SUCCESS : GetLastError();
-    VirtualFreeEx(process, remotePath, 0, MEM_RELEASE);
+    if (!remoteThreadTimedOut)
+        VirtualFreeEx(process, remotePath, 0, MEM_RELEASE);
     CloseHandle(process);
 
     if (ok)
@@ -836,7 +840,8 @@ void showEditor(HWND owner)
     ShowWindow(hwnd, SW_SHOW);
     SetForegroundWindow(hwnd);
     MSG msg{};
-    while (IsWindow(hwnd) && GetMessageW(&msg, nullptr, 0, 0))
+    BOOL messageResult = FALSE;
+    while (IsWindow(hwnd) && (messageResult = GetMessageW(&msg, nullptr, 0, 0)) > 0)
     {
         if (!IsDialogMessageW(hwnd, &msg))
         {
@@ -846,6 +851,8 @@ void showEditor(HWND owner)
     }
     EnableWindow(owner, TRUE);
     SetForegroundWindow(owner);
+    if (messageResult == 0)
+        PostQuitMessage(0);
 }
 
 void openLog()
@@ -900,6 +907,12 @@ void removeTrayIcon()
 
 LRESULT CALLBACK windowProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam)
 {
+    if (g_taskbarCreatedMessage && msg == g_taskbarCreatedMessage)
+    {
+        addTrayIcon(hwnd);
+        return 0;
+    }
+
     switch (msg)
     {
     case kTrayMessage:
@@ -1007,6 +1020,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int)
     if (!acquireSingleInstance())
         return 0;
 
+    g_taskbarCreatedMessage = RegisterWindowMessageW(L"TaskbarCreated");
     initFonts();
     g_windowBrush = CreateSolidBrush(g_windowColor);
     g_fieldBrush = CreateSolidBrush(g_fieldColor);
