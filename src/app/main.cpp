@@ -822,7 +822,7 @@ LRESULT CALLBACK editorProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam)
 void showEditor(HWND owner)
 {
     EditorState state{};
-    HWND hwnd = CreateWindowExW(WS_EX_DLGMODALFRAME, kEditorClass, L"Edit Whitelist",
+    HWND hwnd = CreateWindowExW(WS_EX_APPWINDOW | WS_EX_DLGMODALFRAME, kEditorClass, L"Edit Whitelist",
         WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_THICKFRAME,
         CW_USEDEFAULT, CW_USEDEFAULT, scale(620), scale(460),
         owner, nullptr, g_instance, &state);
@@ -831,6 +831,7 @@ void showEditor(HWND owner)
 
     EnableWindow(owner, FALSE);
     ShowWindow(hwnd, SW_SHOW);
+    SetForegroundWindow(hwnd);
     MSG msg{};
     while (IsWindow(hwnd) && GetMessageW(&msg, nullptr, 0, 0))
     {
