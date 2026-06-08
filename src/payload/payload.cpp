@@ -263,10 +263,10 @@ DWORD WINAPI workerThread(void*)
 {
     seedRealNvApiQueryInterface();
 
-    for (int i = 0; g_running && i < 600; ++i)
+    for (int i = 0; g_running && i < 120; ++i)
     {
         scanAndPatchImports();
-        Sleep(500);
+        Sleep(1000);
     }
 
     return 0;
