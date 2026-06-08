@@ -634,12 +634,12 @@ void resizeEditor(HWND hwnd, EditorState* state)
     const int addWidth = scale(78);
     const int browseWidth = scale(100);
     const int buttonY = rect.bottom - scale(52);
-    MoveWindow(state->title, margin, scale(18), rect.right - margin * 2, scale(28), TRUE);
-    MoveWindow(state->hint, margin, scale(50), rect.right - margin * 2, scale(24), TRUE);
-    MoveWindow(state->entry, margin, scale(82), rect.right - margin * 2 - addWidth - browseWidth - gap * 2, scale(32), TRUE);
-    MoveWindow(GetDlgItem(hwnd, kIdAddEntry), rect.right - margin - addWidth - browseWidth - gap, scale(82), addWidth, scale(32), TRUE);
-    MoveWindow(GetDlgItem(hwnd, kIdAddExe), rect.right - margin - browseWidth, scale(82), browseWidth, scale(32), TRUE);
-    MoveWindow(state->list, margin, scale(126), rect.right - margin * 2, buttonY - scale(140), TRUE);
+    MoveWindow(state->title, margin, scale(10), rect.right - margin * 2, scale(28), TRUE);
+    MoveWindow(state->hint, margin, scale(42), rect.right - margin * 2, scale(24), TRUE);
+    MoveWindow(state->entry, margin, scale(74), rect.right - margin * 2 - addWidth - browseWidth - gap * 2, scale(32), TRUE);
+    MoveWindow(GetDlgItem(hwnd, kIdAddEntry), rect.right - margin - addWidth - browseWidth - gap, scale(74), addWidth, scale(32), TRUE);
+    MoveWindow(GetDlgItem(hwnd, kIdAddExe), rect.right - margin - browseWidth, scale(74), browseWidth, scale(32), TRUE);
+    MoveWindow(state->list, margin, scale(118), rect.right - margin * 2, buttonY - scale(132), TRUE);
     MoveWindow(GetDlgItem(hwnd, kIdRemoveExe), margin, buttonY, scale(92), scale(32), TRUE);
     MoveWindow(GetDlgItem(hwnd, kIdSave), rect.right - scale(184), buttonY, scale(78), scale(32), TRUE);
     MoveWindow(GetDlgItem(hwnd, kIdCancel), rect.right - scale(94), buttonY, scale(78), scale(32), TRUE);
@@ -826,7 +826,7 @@ void showEditor(HWND owner)
 {
     EditorState state{};
     HWND hwnd = CreateWindowExW(WS_EX_APPWINDOW, kEditorClass, L"Flip Config Bypass - Whitelist",
-        WS_OVERLAPPEDWINDOW,
+        WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_THICKFRAME,
         CW_USEDEFAULT, CW_USEDEFAULT, scale(620), scale(460),
         nullptr, nullptr, g_instance, &state);
     if (!hwnd)
