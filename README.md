@@ -1,30 +1,38 @@
 # Flip Config Bypass
 
-## About
+A minimal Windows x64 tray utility that disables NVIDIA flip metering for selected x64 applications.
 
-Flip Config Bypass is a small Windows tray utility for disabling NVIDIA flip metering in whitelisted x64 applications.
-
-It watches a user-managed whitelist, injects a tiny x64 payload DLL into matching processes, and makes one NVAPI interface unavailable:
+The app watches a whitelist, injects `FlipConfigPayload.dll` into matching processes, and blocks one NVAPI query:
 
 ```text
 0xF3148C42 - NvAPI_D3D12_SetFlipConfig
 ```
 
-The payload hooks `nvapi64.dll!nvapi_QueryInterface`. When a program asks for that one interface ID, the hook returns `nullptr`. Other NVAPI interface queries are forwarded to the real `nvapi_QueryInterface`.
+Everything else is intentionally left alone.
 
-The tool is intentionally narrow:
+## What It Does
 
-- no `dxgi.dll` proxy
-- no overlay
-- no game file replacement
-- no NVIDIA SDK dependency
-- no external hook library
-- no 32-bit payload path
-- no anti-cheat or protected-process bypass
+- Watches only executables listed in `whitelist.txt`
+- Injects only into x64 processes
+- Hooks `nvapi64.dll!nvapi_QueryInterface`
+- Returns `nullptr` only for `0xF3148C42`
+- Forwards all other NVAPI query IDs to the real NVAPI function
+- Logs injection successes and useful failures
+- Restores the tray icon if Windows Explorer restarts
+
+## What It Does Not Do
+
+- No `dxgi.dll` proxy
+- No game file replacement
+- No overlay
+- No NVIDIA SDK dependency
+- No external hook library
+- No 32-bit payload
+- No anti-cheat or protected-process bypass
 
 ## Download
 
-Builds are produced by GitHub Actions.
+Builds are made by GitHub Actions.
 
 Open the repo's **Actions** tab, run **Build**, then download the `FlipConfigBypass-x64` artifact.
 
@@ -39,48 +47,53 @@ Keep both files in the same folder.
 
 ## Usage
 
-Run `FlipConfigBypass.exe`. The app sits in the system tray and creates these files beside the EXE if needed:
+Run `FlipConfigBypass.exe`. The app creates these files beside itself if needed:
 
 ```text
 whitelist.txt
 FlipConfigBypass.log
 ```
 
-Only one tray instance can run at a time.
-
 Right-click the tray icon to:
 
 - edit the whitelist
-- open the log with your default `.log` file handler
-- pause watching
+- open the log with your default `.log` handler
+- pause or resume watching
 - toggle Start with Windows
 - exit
 
-Whitelist entries can be executable names or full paths:
+Only one instance can run at a time.
+
+## Whitelist
+
+Add one executable name or full path per line:
 
 ```text
-GTA5.exe
-C:\Games\Cyberpunk 2077\bin\x64\Cyberpunk2077.exe
+Cyberpunk2077.exe
+witcher3.exe
+C:\Games\Example\Game.exe
 ```
 
-Filename entries are usually easiest. Full-path entries are supported when you want to target one exact install location.
+Executable-name entries are case-insensitive. Full paths are also normalized for case and slash direction.
 
-## Logging
+Filename entries are usually best. Use full paths only when you need to target one exact install.
 
-The log records meaningful events only, such as:
+## Logs
+
+The log records meaningful events only:
 
 ```text
-[14:32:01] GTA5.exe (PID 9432) - injected OK
+[14:32:01] Cyberpunk2077.exe (PID 9432) - injected OK
 [14:42:55] ProtectedGame.exe (PID 2216) - failed, access denied
 ```
 
 Non-whitelisted processes are not logged.
 
-At startup, the app clears `FlipConfigBypass.log` if it is larger than `2 MB`, keeping the file small without background log rotation.
+At startup, `FlipConfigBypass.log` is cleared if it is larger than `2 MB`.
 
 ## Start With Windows
 
-`Start with Windows` uses the current user's registry Run key:
+The startup toggle uses the current user's Run key:
 
 ```text
 HKCU\Software\Microsoft\Windows\CurrentVersion\Run
@@ -88,26 +101,30 @@ HKCU\Software\Microsoft\Windows\CurrentVersion\Run
 
 It does not install a service and should not require administrator permission.
 
-If you move the app folder, toggle Start with Windows off and on again so Windows points to the new EXE path.
+If you move the app folder, toggle Start with Windows off and on again.
 
-## How It Works
+## How The Payload Works
 
-The tray app scans running processes every few seconds. If a process matches the whitelist, the app verifies that it is x64, then loads `FlipConfigPayload.dll` into that process.
+Inside a whitelisted x64 process, the payload patches:
 
-Inside the target process, the payload:
+- direct imports of `nvapi64.dll!nvapi_QueryInterface`
+- `GetProcAddress` imports used for dynamic NVAPI lookup
 
-- patches direct imports of `nvapi64.dll!nvapi_QueryInterface`
-- patches `GetProcAddress` imports so dynamic NVAPI lookups receive the hook
-- blocks only interface ID `0xF3148C42`
-- scans newly loaded modules for a limited startup window, then stops
+When `nvapi_QueryInterface` is called, the payload blocks only:
 
-The tray app still detects 32-bit targets and logs an architecture mismatch instead of trying to inject the x64 payload.
+```text
+0xF3148C42
+```
+
+All other NVAPI query IDs are forwarded.
+
+The payload scans newly loaded modules every `500 ms` for about `5 minutes`, then stops. Hooks already installed remain active for the process lifetime.
 
 ## False Positives
 
-This tool uses normal user-mode DLL injection into whitelisted processes. Antivirus products may flag that behavior even though the source is small and auditable.
+This project uses normal user-mode DLL injection. Antivirus products may flag that behavior.
 
-If you use it personally, prefer a narrow exclusion for the folder containing:
+For personal use, prefer a narrow exclusion for the folder containing:
 
 ```text
 FlipConfigBypass.exe
@@ -116,18 +133,19 @@ whitelist.txt
 FlipConfigBypass.log
 ```
 
-Do not allow a broad detection name globally.
+Avoid broad exclusions for a whole detection name.
 
 ## Limitations
 
 - Windows x64 only
-- Targets must be x64
-- Only `nvapi64.dll` is hooked
+- Target processes must be x64
+- Only `nvapi64.dll` is handled
 - Protected or anti-cheat-enabled games may block injection
-- If a game resolved and cached NVAPI before injection, this tool may not affect that cached pointer
+- NVAPI pointers resolved before injection may stay cached and unaffected
+- Modules loaded after the payload scan window may not be patched
 
 ## Build
 
-The GitHub Actions workflow builds directly with the Visual C++ compiler on a Windows runner.
+The GitHub Actions workflow builds with the Visual C++ toolchain on a Windows runner.
 
-Manual local builds require the Visual Studio C++ toolchain.
+Local builds require the Visual Studio C++ build tools.
