@@ -10,8 +10,13 @@
 using NvApiQueryInterface = void* (__cdecl*)(unsigned int interfaceId);
 using GetProcAddressFn = FARPROC(WINAPI*)(HMODULE module, LPCSTR procName);
 
+static_assert(sizeof(void*) == 8, "FlipConfigPayload must be built as x64.");
+
 namespace
 {
+constexpr int kModuleScanIterations = 120;
+constexpr DWORD kModuleScanIntervalMs = 1000;
+
 std::atomic<NvApiQueryInterface> g_realNvApiQueryInterface{ nullptr };
 std::atomic<GetProcAddressFn> g_realGetProcAddress{ ::GetProcAddress };
 std::atomic<bool> g_running{ true };
@@ -114,11 +119,13 @@ bool getPeImageView(HMODULE module, PeImageView& image)
 
     auto* base = reinterpret_cast<std::uint8_t*>(module);
     auto* dos = reinterpret_cast<IMAGE_DOS_HEADER*>(base);
-    if (dos->e_magic != IMAGE_DOS_SIGNATURE || dos->e_lfanew <= 0)
+    if (dos->e_magic != IMAGE_DOS_SIGNATURE || dos->e_lfanew < static_cast<LONG>(sizeof(IMAGE_DOS_HEADER)))
         return false;
 
-    auto* nt = reinterpret_cast<IMAGE_NT_HEADERS*>(base + dos->e_lfanew);
-    if (nt->Signature != IMAGE_NT_SIGNATURE || !nt->OptionalHeader.SizeOfImage)
+    auto* nt = reinterpret_cast<IMAGE_NT_HEADERS64*>(base + dos->e_lfanew);
+    if (nt->Signature != IMAGE_NT_SIGNATURE ||
+        nt->OptionalHeader.Magic != IMAGE_NT_OPTIONAL_HDR64_MAGIC ||
+        !nt->OptionalHeader.SizeOfImage)
         return false;
 
     image.base = base;
@@ -167,7 +174,7 @@ void patchModuleImportsUnsafe(HMODULE module)
         return;
 
     auto* dos = reinterpret_cast<IMAGE_DOS_HEADER*>(image.base);
-    auto* nt = reinterpret_cast<IMAGE_NT_HEADERS*>(image.base + dos->e_lfanew);
+    auto* nt = reinterpret_cast<IMAGE_NT_HEADERS64*>(image.base + dos->e_lfanew);
     const auto& importDir = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT];
     if (!rvaRangeInImage(image, importDir.VirtualAddress, sizeof(IMAGE_IMPORT_DESCRIPTOR)))
         return;
@@ -286,10 +293,10 @@ DWORD WINAPI workerThread(void*)
 {
     seedRealNvApiQueryInterface();
 
-    for (int i = 0; g_running && i < 120; ++i)
+    for (int i = 0; g_running && i < kModuleScanIterations; ++i)
     {
         scanAndPatchImports();
-        Sleep(1000);
+        Sleep(kModuleScanIntervalMs);
     }
 
     return 0;
@@ -303,10 +310,13 @@ BOOL APIENTRY DllMain(HMODULE module, DWORD reason, void*)
         DisableThreadLibraryCalls(module);
 
         HMODULE pinned = nullptr;
-        GetModuleHandleExW(
+        if (!GetModuleHandleExW(
             GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_PIN,
             reinterpret_cast<LPCWSTR>(&DllMain),
-            &pinned);
+            &pinned))
+        {
+            return FALSE;
+        }
 
         HANDLE thread = CreateThread(nullptr, 0, workerThread, nullptr, 0, nullptr);
         if (thread)
