@@ -1,5 +1,6 @@
 #include <windows.h>
 
+#include <algorithm>
 #include <atomic>
 #include <cstdint>
 #include <cstring>
@@ -45,16 +46,20 @@ void cacheNvApiModule(HMODULE module)
 
 bool rememberModule(HMODULE module)
 {
-    for (unsigned int i = 0; i < g_scannedModuleCount; ++i)
-    {
-        if (g_scannedModules[i] == module)
-            return false;
-    }
+    HMODULE* begin = g_scannedModules;
+    HMODULE* end = g_scannedModules + g_scannedModuleCount;
+    HMODULE* it = std::lower_bound(begin, end, module, [](HMODULE left, HMODULE right) {
+        return reinterpret_cast<std::uintptr_t>(left) < reinterpret_cast<std::uintptr_t>(right);
+    });
+    if (it != end && *it == module)
+        return false;
 
     if (g_scannedModuleCount >= kMaxScannedModules)
         return false;
 
-    g_scannedModules[g_scannedModuleCount++] = module;
+    std::move_backward(it, end, end + 1);
+    *it = module;
+    ++g_scannedModuleCount;
 
     return true;
 }
