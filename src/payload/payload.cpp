@@ -1,5 +1,4 @@
 #include <windows.h>
-#include <tlhelp32.h>
 
 #include <atomic>
 #include <cstdint>
@@ -9,6 +8,7 @@
 
 using NvApiQueryInterface = void* (__cdecl*)(unsigned int interfaceId);
 using GetProcAddressFn = FARPROC(WINAPI*)(HMODULE module, LPCSTR procName);
+using EnumProcessModulesFn = BOOL(WINAPI*)(HANDLE process, HMODULE* modules, DWORD bytes, LPDWORD bytesNeeded);
 
 static_assert(sizeof(void*) == 8, "FlipConfigPayload must be built as x64.");
 
@@ -312,27 +312,35 @@ void patchModuleImports(HMODULE module)
     }
 }
 
+EnumProcessModulesFn enumProcessModulesFn()
+{
+    static EnumProcessModulesFn fn = reinterpret_cast<EnumProcessModulesFn>(
+        GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "K32EnumProcessModules"));
+    return fn;
+}
+
 void scanAndPatchImports()
 {
     seedRealNvApiQueryInterface();
 
-    HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE, GetCurrentProcessId());
-    if (snapshot == INVALID_HANDLE_VALUE)
+    EnumProcessModulesFn enumModules = enumProcessModulesFn();
+    if (!enumModules)
         return;
 
-    MODULEENTRY32W entry{};
-    entry.dwSize = sizeof(entry);
-    if (Module32FirstW(snapshot, &entry))
-    {
-        do
-        {
-            HMODULE module = reinterpret_cast<HMODULE>(entry.modBaseAddr);
-            if (rememberModule(module))
-                patchModuleImports(module);
-        } while (Module32NextW(snapshot, &entry));
-    }
+    HMODULE modules[kMaxScannedModules]{};
+    DWORD bytesNeeded = 0;
+    if (!enumModules(GetCurrentProcess(), modules, sizeof(modules), &bytesNeeded))
+        return;
 
-    CloseHandle(snapshot);
+    DWORD moduleCount = bytesNeeded / sizeof(HMODULE);
+    if (moduleCount > kMaxScannedModules)
+        moduleCount = kMaxScannedModules;
+
+    for (DWORD i = 0; i < moduleCount; ++i)
+    {
+        if (rememberModule(modules[i]))
+            patchModuleImports(modules[i]);
+    }
 }
 
 DWORD WINAPI workerThread(void*)
