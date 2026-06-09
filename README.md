@@ -118,7 +118,7 @@ When `nvapi_QueryInterface` is called, the payload blocks only:
 
 All other NVAPI query IDs are forwarded.
 
-The payload scans newly loaded modules every `500 ms` for about `5 minutes`, then stops. Hooks already installed remain active for the process lifetime.
+The payload scans newly loaded modules every `1 second` for about `2 minutes`, then stops. Hooks already installed remain active for the process lifetime.
 
 ## False Positives
 

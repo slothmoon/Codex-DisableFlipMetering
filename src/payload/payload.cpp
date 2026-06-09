@@ -84,9 +84,9 @@ FARPROC WINAPI hookedGetProcAddress(HMODULE module, LPCSTR procName)
     GetProcAddressFn realGetProcAddress = g_realGetProcAddress.load(std::memory_order_acquire);
     FARPROC proc = realGetProcAddress(module, procName);
 
-    if (procName && reinterpret_cast<uintptr_t>(procName) > 0xFFFF &&
+    if (proc && procName && reinterpret_cast<uintptr_t>(procName) > 0xFFFF &&
         std::strcmp(procName, "nvapi_QueryInterface") == 0 &&
-        proc && isNvApiModule(module))
+        isNvApiModule(module))
     {
         g_realNvApiQueryInterface.store(reinterpret_cast<NvApiQueryInterface>(proc), std::memory_order_release);
         return reinterpret_cast<FARPROC>(&hookedNvApiQueryInterface);
@@ -144,30 +144,68 @@ bool patchThunk(IMAGE_THUNK_DATA* thunk, void* replacement, void** original)
     return true;
 }
 
-bool patchImportUnsafe(HMODULE module, const char* importedModuleName, const char* procName, void* replacement, void** original)
+void* procAddressFrom(const char* moduleName, const char* procName, GetProcAddressFn realGetProcAddress)
+{
+    HMODULE module = GetModuleHandleA(moduleName);
+    return module ? reinterpret_cast<void*>(realGetProcAddress(module, procName)) : nullptr;
+}
+
+void patchModuleImportsUnsafe(HMODULE module)
 {
     PeImageView image{};
     if (!getPeImageView(module, image))
-        return false;
+        return;
 
     auto* dos = reinterpret_cast<IMAGE_DOS_HEADER*>(image.base);
     auto* nt = reinterpret_cast<IMAGE_NT_HEADERS*>(image.base + dos->e_lfanew);
     const auto& importDir = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT];
     if (!rvaRangeInImage(image, importDir.VirtualAddress, sizeof(IMAGE_IMPORT_DESCRIPTOR)))
-        return false;
+        return;
 
-    bool patched = false;
     GetProcAddressFn realGetProcAddress = g_realGetProcAddress.load(std::memory_order_acquire);
-    HMODULE importedModule = GetModuleHandleA(importedModuleName);
-    void* targetProc = importedModule ? reinterpret_cast<void*>(realGetProcAddress(importedModule, procName)) : nullptr;
+    void* kernel32GetProc = procAddressFrom("KERNEL32.dll", "GetProcAddress", realGetProcAddress);
+    void* kernelbaseGetProc = procAddressFrom("KERNELBASE.dll", "GetProcAddress", realGetProcAddress);
+    void* nvapiQuery = procAddressFrom("nvapi64.dll", "nvapi_QueryInterface", realGetProcAddress);
+    void* originalGetProc = nullptr;
+    void* originalNvQuery = nullptr;
 
     const DWORD maxDescriptors = importDir.Size / sizeof(IMAGE_IMPORT_DESCRIPTOR);
     auto* desc = rvaToPtr<IMAGE_IMPORT_DESCRIPTOR>(image, importDir.VirtualAddress);
     for (DWORD descIndex = 0; desc && descIndex < maxDescriptors && desc->Name; ++descIndex, ++desc)
     {
         const char* dllName = rvaToPtr<char>(image, desc->Name, 1);
-        if (!dllName || _stricmp(dllName, importedModuleName) != 0 || !desc->FirstThunk)
+        if (!dllName || !desc->FirstThunk)
             continue;
+
+        const char* procName = nullptr;
+        void* targetProc = nullptr;
+        void* replacement = nullptr;
+        void** original = nullptr;
+        if (_stricmp(dllName, "KERNEL32.dll") == 0)
+        {
+            procName = "GetProcAddress";
+            targetProc = kernel32GetProc;
+            replacement = reinterpret_cast<void*>(&hookedGetProcAddress);
+            original = &originalGetProc;
+        }
+        else if (_stricmp(dllName, "KERNELBASE.dll") == 0)
+        {
+            procName = "GetProcAddress";
+            targetProc = kernelbaseGetProc;
+            replacement = reinterpret_cast<void*>(&hookedGetProcAddress);
+            original = &originalGetProc;
+        }
+        else if (_stricmp(dllName, "nvapi64.dll") == 0)
+        {
+            procName = "nvapi_QueryInterface";
+            targetProc = nvapiQuery;
+            replacement = reinterpret_cast<void*>(&hookedNvApiQueryInterface);
+            original = &originalNvQuery;
+        }
+        else
+        {
+            continue;
+        }
 
         auto* thunk = rvaToPtr<IMAGE_THUNK_DATA>(image, desc->FirstThunk);
         auto* origThunk = desc->OriginalFirstThunk ? rvaToPtr<IMAGE_THUNK_DATA>(image, desc->OriginalFirstThunk) : nullptr;
@@ -197,43 +235,25 @@ bool patchImportUnsafe(HMODULE module, const char* importedModuleName, const cha
             }
 
             if (shouldPatch)
-                patched = patchThunk(thunk, replacement, original) || patched;
+                patchThunk(thunk, replacement, original);
         }
     }
 
-    return patched;
-}
-
-bool patchImport(HMODULE module, const char* importedModuleName, const char* procName, void* replacement, void** original)
-{
-    __try
-    {
-        return patchImportUnsafe(module, importedModuleName, procName, replacement, original);
-    }
-    __except (EXCEPTION_EXECUTE_HANDLER)
-    {
-        return false;
-    }
+    if (originalGetProc)
+        g_realGetProcAddress.store(reinterpret_cast<GetProcAddressFn>(originalGetProc), std::memory_order_release);
+    if (originalNvQuery)
+        g_realNvApiQueryInterface.store(reinterpret_cast<NvApiQueryInterface>(originalNvQuery), std::memory_order_release);
 }
 
 void patchModuleImports(HMODULE module)
 {
-    void* originalGetProc = nullptr;
-    const char* loaderModules[] = {
-        "KERNEL32.dll",
-        "KERNELBASE.dll"
-    };
-
-    for (const char* loaderModule : loaderModules)
+    __try
     {
-        originalGetProc = nullptr;
-        if (patchImport(module, loaderModule, "GetProcAddress", reinterpret_cast<void*>(&hookedGetProcAddress), &originalGetProc) && originalGetProc)
-            g_realGetProcAddress.store(reinterpret_cast<GetProcAddressFn>(originalGetProc), std::memory_order_release);
+        patchModuleImportsUnsafe(module);
     }
-
-    void* originalNvQuery = nullptr;
-    if (patchImport(module, "nvapi64.dll", "nvapi_QueryInterface", reinterpret_cast<void*>(&hookedNvApiQueryInterface), &originalNvQuery) && originalNvQuery)
-        g_realNvApiQueryInterface.store(reinterpret_cast<NvApiQueryInterface>(originalNvQuery), std::memory_order_release);
+    __except (EXCEPTION_EXECUTE_HANDLER)
+    {
+    }
 }
 
 void scanAndPatchImports()
