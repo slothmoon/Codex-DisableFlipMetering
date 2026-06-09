@@ -13,6 +13,7 @@
 #include <string>
 #include <thread>
 #include <unordered_set>
+#include <utility>
 #include <vector>
 
 #include "resource.h"
@@ -57,6 +58,7 @@ std::mutex g_stateMutex;
 std::vector<std::wstring> g_whitelist;
 std::unordered_set<std::wstring> g_whitelistNames;
 std::unordered_set<std::wstring> g_whitelistPaths;
+std::unordered_set<std::wstring> g_whitelistPathNames;
 bool g_hasPathWhitelist = false;
 std::unordered_set<DWORD> g_attemptedPids;
 std::wstring g_exePath;
@@ -249,9 +251,12 @@ void appendLog(const std::wstring& message)
     SYSTEMTIME time{};
     GetLocalTime(&time);
 
-    wchar_t line[1024]{};
-    swprintf_s(line, L"[%02u:%02u:%02u] %s\r\n", time.wHour, time.wMinute, time.wSecond, message.c_str());
+    wchar_t prefix[32]{};
+    swprintf_s(prefix, L"[%02u:%02u:%02u] ", time.wHour, time.wMinute, time.wSecond);
 
+    std::wstring line = prefix;
+    line += message;
+    line += L"\r\n";
     const std::string bytes = wideToUtf8(line);
     HANDLE file = CreateFileW(g_logPath.c_str(), FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
     if (file == INVALID_HANDLE_VALUE)
@@ -294,6 +299,7 @@ void loadWhitelist()
     std::vector<std::wstring> entries;
     std::unordered_set<std::wstring> names;
     std::unordered_set<std::wstring> paths;
+    std::unordered_set<std::wstring> pathNames;
     std::wstring content = readTextFile(g_whitelistPath);
     size_t start = 0;
     while (start <= content.size())
@@ -306,7 +312,12 @@ void loadWhitelist()
             if (isPathEntry(normalized))
             {
                 if (paths.insert(normalized).second)
+                {
+                    std::wstring pathName = fileNameFromPath(normalized);
+                    if (!pathName.empty())
+                        pathNames.insert(std::move(pathName));
                     entries.push_back(line);
+                }
             }
             else
             {
@@ -326,6 +337,7 @@ void loadWhitelist()
     g_whitelist = std::move(entries);
     g_whitelistNames = std::move(names);
     g_whitelistPaths = std::move(paths);
+    g_whitelistPathNames = std::move(pathNames);
     g_hasPathWhitelist = !g_whitelistPaths.empty();
 }
 
@@ -339,13 +351,14 @@ struct WhitelistMatchSnapshot
 {
     std::unordered_set<std::wstring> names;
     std::unordered_set<std::wstring> paths;
+    std::unordered_set<std::wstring> pathNames;
     bool hasPathEntries = false;
 };
 
 WhitelistMatchSnapshot whitelistMatchSnapshot()
 {
     std::lock_guard<std::mutex> lock(g_stateMutex);
-    return { g_whitelistNames, g_whitelistPaths, g_hasPathWhitelist };
+    return { g_whitelistNames, g_whitelistPaths, g_whitelistPathNames, g_hasPathWhitelist };
 }
 
 bool pidWasAttempted(DWORD pid)
@@ -382,11 +395,6 @@ bool matchesWhitelist(const WhitelistMatchSnapshot& whitelist, const std::wstrin
         return false;
 
     return whitelist.paths.find(normalizeWhitelistValue(fullPath)) != whitelist.paths.end();
-}
-
-bool matchesWhitelistedName(const WhitelistMatchSnapshot& whitelist, const std::wstring& exeName)
-{
-    return whitelist.names.find(toLower(exeName)) != whitelist.names.end();
 }
 
 std::wstring processPath(DWORD pid)
@@ -547,14 +555,14 @@ void watcherLoop()
                         if (pidWasAttempted(entry.th32ProcessID))
                             continue;
 
-                        std::wstring exeName = entry.szExeFile;
+                        const std::wstring exeName = entry.szExeFile;
                         std::wstring fullPath;
-                        const bool nameMatched = matchesWhitelistedName(whitelist, exeName);
-                        if (!nameMatched && whitelist.hasPathEntries)
+                        const std::wstring exeLower = toLower(exeName);
+                        const bool nameMatched = whitelist.names.find(exeLower) != whitelist.names.end();
+                        if (!nameMatched && whitelist.hasPathEntries &&
+                            whitelist.pathNames.find(exeLower) != whitelist.pathNames.end())
                         {
                             fullPath = processPath(entry.th32ProcessID);
-                            if (!fullPath.empty())
-                                exeName = fileNameFromPath(fullPath);
                         }
 
                         if (nameMatched || matchesWhitelist(whitelist, exeName, fullPath))
@@ -656,11 +664,11 @@ void populateWhitelistList(HWND list)
         SendMessageW(list, LB_ADDSTRING, 0, reinterpret_cast<LPARAM>(entry.c_str()));
 }
 
-void saveWhitelistList(HWND list)
+bool saveWhitelistList(HWND list)
 {
     const int count = static_cast<int>(SendMessageW(list, LB_GETCOUNT, 0, 0));
     if (count == LB_ERR)
-        return;
+        return false;
 
     std::wstring content;
     for (int i = 0; i < count; ++i)
@@ -679,8 +687,11 @@ void saveWhitelistList(HWND list)
     if (!content.empty())
         content += L"\r\n";
 
-    writeTextFile(g_whitelistPath, content);
+    if (!writeTextFile(g_whitelistPath, content))
+        return false;
+
     loadWhitelist();
+    return true;
 }
 
 bool listContainsNormalizedEntry(HWND list, const std::wstring& entry)
@@ -789,9 +800,15 @@ LRESULT CALLBACK editorProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam)
         }
         else if (LOWORD(wparam) == kIdSave)
         {
-            saveWhitelistList(state->list);
-            updateTrayTip();
-            DestroyWindow(hwnd);
+            if (saveWhitelistList(state->list))
+            {
+                updateTrayTip();
+                DestroyWindow(hwnd);
+            }
+            else
+            {
+                MessageBoxW(hwnd, L"Could not save whitelist.txt.", L"Flip Config Bypass", MB_ICONERROR | MB_OK);
+            }
         }
         else if (LOWORD(wparam) == kIdCancel)
         {

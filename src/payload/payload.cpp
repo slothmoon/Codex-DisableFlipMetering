@@ -2,7 +2,6 @@
 #include <tlhelp32.h>
 
 #include <atomic>
-#include <cwchar>
 #include <cstdint>
 #include <cstring>
 
@@ -29,13 +28,7 @@ struct PeImageView
 
 bool isNvApiModule(HMODULE module)
 {
-    wchar_t path[MAX_PATH]{};
-    if (!GetModuleFileNameW(module, path, MAX_PATH))
-        return false;
-
-    const wchar_t* name = wcsrchr(path, L'\\');
-    name = name ? name + 1 : path;
-    return _wcsicmp(name, L"nvapi64.dll") == 0;
+    return module && module == GetModuleHandleW(L"nvapi64.dll");
 }
 
 bool rememberModule(HMODULE module)
