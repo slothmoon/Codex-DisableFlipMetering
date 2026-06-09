@@ -363,25 +363,21 @@ WhitelistMatchSnapshot whitelistMatchSnapshot()
 
 bool pidWasAttempted(DWORD pid)
 {
-    std::lock_guard<std::mutex> lock(g_stateMutex);
     return g_attemptedPids.find(pid) != g_attemptedPids.end();
 }
 
 bool hasAttemptedPids()
 {
-    std::lock_guard<std::mutex> lock(g_stateMutex);
     return !g_attemptedPids.empty();
 }
 
 void markPidAttempted(DWORD pid)
 {
-    std::lock_guard<std::mutex> lock(g_stateMutex);
     g_attemptedPids.insert(pid);
 }
 
 void pruneAttemptedPids(const std::unordered_set<DWORD>& livePids)
 {
-    std::lock_guard<std::mutex> lock(g_stateMutex);
     for (auto it = g_attemptedPids.begin(); it != g_attemptedPids.end();)
     {
         if (livePids.find(*it) == livePids.end())
@@ -391,13 +387,9 @@ void pruneAttemptedPids(const std::unordered_set<DWORD>& livePids)
     }
 }
 
-bool matchesWhitelist(const WhitelistMatchSnapshot& whitelist, const std::wstring& exeName, const std::wstring& fullPath)
+bool matchesWhitelistedPath(const WhitelistMatchSnapshot& whitelist, const std::wstring& fullPath)
 {
-    const std::wstring exeLower = toLower(exeName);
-    if (whitelist.names.find(exeLower) != whitelist.names.end())
-        return true;
-
-    if (!whitelist.hasPathEntries || fullPath.empty())
+    if (fullPath.empty())
         return false;
 
     return whitelist.paths.find(normalizeWhitelistValue(fullPath)) != whitelist.paths.end();
@@ -542,52 +534,55 @@ bool injectPayload(DWORD pid, const std::wstring& exeName)
 
 void watcherLoop()
 {
-    while (g_running)
+    while (g_running.load(std::memory_order_relaxed))
     {
-        if (!g_paused)
+        if (!g_paused.load(std::memory_order_relaxed))
         {
             const WhitelistMatchSnapshot whitelist = whitelistMatchSnapshot();
             const bool shouldPruneAttemptedPids = hasAttemptedPids();
-            std::unordered_set<DWORD> livePids;
-            HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
-            if (snapshot != INVALID_HANDLE_VALUE)
+            if (!whitelist.names.empty() || whitelist.hasPathEntries || shouldPruneAttemptedPids)
             {
-                PROCESSENTRY32W entry{};
-                entry.dwSize = sizeof(entry);
-                if (Process32FirstW(snapshot, &entry))
+                std::unordered_set<DWORD> livePids;
+                HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+                if (snapshot != INVALID_HANDLE_VALUE)
                 {
-                    do
+                    PROCESSENTRY32W entry{};
+                    entry.dwSize = sizeof(entry);
+                    if (Process32FirstW(snapshot, &entry))
                     {
-                        if (shouldPruneAttemptedPids)
-                            livePids.insert(entry.th32ProcessID);
-                        if (pidWasAttempted(entry.th32ProcessID))
-                            continue;
-
-                        const std::wstring exeName = entry.szExeFile;
-                        std::wstring fullPath;
-                        const std::wstring exeLower = toLower(exeName);
-                        const bool nameMatched = whitelist.names.find(exeLower) != whitelist.names.end();
-                        if (!nameMatched && whitelist.hasPathEntries &&
-                            whitelist.pathNames.find(exeLower) != whitelist.pathNames.end())
+                        do
                         {
-                            fullPath = processPath(entry.th32ProcessID);
-                        }
+                            if (shouldPruneAttemptedPids)
+                                livePids.insert(entry.th32ProcessID);
+                            if (pidWasAttempted(entry.th32ProcessID))
+                                continue;
 
-                        if (nameMatched || matchesWhitelist(whitelist, exeName, fullPath))
-                        {
-                            markPidAttempted(entry.th32ProcessID);
-                            injectPayload(entry.th32ProcessID, exeName);
-                        }
-                    } while (Process32NextW(snapshot, &entry));
+                            const std::wstring exeName = entry.szExeFile;
+                            std::wstring fullPath;
+                            const std::wstring exeLower = toLower(exeName);
+                            const bool nameMatched = whitelist.names.find(exeLower) != whitelist.names.end();
+                            if (!nameMatched && whitelist.hasPathEntries &&
+                                whitelist.pathNames.find(exeLower) != whitelist.pathNames.end())
+                            {
+                                fullPath = processPath(entry.th32ProcessID);
+                            }
+
+                            if (nameMatched || matchesWhitelistedPath(whitelist, fullPath))
+                            {
+                                markPidAttempted(entry.th32ProcessID);
+                                injectPayload(entry.th32ProcessID, exeName);
+                            }
+                        } while (Process32NextW(snapshot, &entry));
+                    }
+
+                    CloseHandle(snapshot);
+                    if (shouldPruneAttemptedPids)
+                        pruneAttemptedPids(livePids);
                 }
-
-                CloseHandle(snapshot);
-                if (shouldPruneAttemptedPids)
-                    pruneAttemptedPids(livePids);
             }
         }
 
-        for (int i = 0; g_running && i < 20; ++i)
+        for (int i = 0; g_running.load(std::memory_order_relaxed) && i < 20; ++i)
             Sleep(100);
     }
 }
@@ -633,7 +628,7 @@ void updateTrayTip()
 {
     const size_t watched = whitelistSnapshot().size();
     std::wstring tip = L"Flip Config Bypass\r\n";
-    tip += g_paused ? L"Paused" : L"Watching " + std::to_wstring(watched) + L" apps";
+    tip += g_paused.load(std::memory_order_relaxed) ? L"Paused" : L"Watching " + std::to_wstring(watched) + L" apps";
     wcsncpy_s(g_tray.szTip, tip.c_str(), _TRUNCATE);
     Shell_NotifyIconW(NIM_MODIFY, &g_tray);
 }
@@ -895,14 +890,15 @@ void showTrayMenu(HWND hwnd)
     GetCursorPos(&point);
     HMENU menu = CreatePopupMenu();
     const size_t watched = whitelistSnapshot().size();
-    const std::wstring status = (g_paused ? L"Paused - " : L"Running - ") + std::to_wstring(watched) + L" apps watched";
+    const bool paused = g_paused.load(std::memory_order_relaxed);
+    const std::wstring status = (paused ? L"Paused - " : L"Running - ") + std::to_wstring(watched) + L" apps watched";
 
     AppendMenuW(menu, MF_STRING | MF_DISABLED, 0, L"Flip Config Bypass");
-    AppendMenuW(menu, MF_STRING | MF_DISABLED | (g_paused ? 0 : MF_CHECKED), 0, status.c_str());
+    AppendMenuW(menu, MF_STRING | MF_DISABLED | (paused ? 0 : MF_CHECKED), 0, status.c_str());
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(menu, MF_STRING, kIdEditWhitelist, L"Edit Whitelist...");
     AppendMenuW(menu, MF_STRING, kIdViewLog, L"Open Log...");
-    AppendMenuW(menu, MF_STRING | (g_paused ? MF_CHECKED : 0), kIdPauseWatching, L"Pause Watching");
+    AppendMenuW(menu, MF_STRING | (paused ? MF_CHECKED : 0), kIdPauseWatching, L"Pause Watching");
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(menu, MF_STRING | (startWithWindowsEnabled() ? MF_CHECKED : 0), kIdStartWithWindows, L"Start with Windows");
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
@@ -955,7 +951,7 @@ LRESULT CALLBACK windowProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam)
             openLog();
             return 0;
         case kIdPauseWatching:
-            g_paused = !g_paused.load();
+            g_paused.store(!g_paused.load(std::memory_order_relaxed), std::memory_order_relaxed);
             updateTrayTip();
             return 0;
         case kIdStartWithWindows:
@@ -967,7 +963,7 @@ LRESULT CALLBACK windowProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam)
         }
         break;
     case WM_DESTROY:
-        g_running = false;
+        g_running.store(false, std::memory_order_relaxed);
         removeTrayIcon();
         PostQuitMessage(0);
         return 0;
@@ -1083,7 +1079,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int)
         DispatchMessageW(&msg);
     }
 
-    g_running = false;
+    g_running.store(false, std::memory_order_relaxed);
     if (g_watcherThread.joinable())
         g_watcherThread.join();
 
