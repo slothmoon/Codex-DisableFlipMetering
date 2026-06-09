@@ -19,6 +19,8 @@ std::atomic<bool> g_running{ true };
 HMODULE g_scannedModules[512]{};
 unsigned int g_scannedModuleCount = 0;
 
+void* __cdecl hookedNvApiQueryInterface(unsigned int interfaceId);
+
 struct PeImageView
 {
     std::uint8_t* base = nullptr;
@@ -52,6 +54,15 @@ bool rememberModule(HMODULE module)
     return true;
 }
 
+void storeRealNvApiQueryInterfaceIfUnset(NvApiQueryInterface queryInterface)
+{
+    if (!queryInterface || queryInterface == &hookedNvApiQueryInterface)
+        return;
+
+    NvApiQueryInterface expected = nullptr;
+    g_realNvApiQueryInterface.compare_exchange_strong(expected, queryInterface, std::memory_order_release, std::memory_order_acquire);
+}
+
 void seedRealNvApiQueryInterface()
 {
     if (g_realNvApiQueryInterface.load(std::memory_order_acquire))
@@ -63,10 +74,7 @@ void seedRealNvApiQueryInterface()
     {
         auto queryInterface = reinterpret_cast<NvApiQueryInterface>(
             realGetProcAddress(module, "nvapi_QueryInterface"));
-        if (queryInterface)
-        {
-            g_realNvApiQueryInterface.store(queryInterface, std::memory_order_release);
-        }
+        storeRealNvApiQueryInterfaceIfUnset(queryInterface);
     }
 }
 
@@ -88,7 +96,7 @@ FARPROC WINAPI hookedGetProcAddress(HMODULE module, LPCSTR procName)
         std::strcmp(procName, "nvapi_QueryInterface") == 0 &&
         isNvApiModule(module))
     {
-        g_realNvApiQueryInterface.store(reinterpret_cast<NvApiQueryInterface>(proc), std::memory_order_release);
+        storeRealNvApiQueryInterfaceIfUnset(reinterpret_cast<NvApiQueryInterface>(proc));
         return reinterpret_cast<FARPROC>(&hookedNvApiQueryInterface);
     }
 
@@ -166,7 +174,6 @@ void patchModuleImportsUnsafe(HMODULE module)
     void* kernel32GetProc = procAddressFrom("KERNEL32.dll", "GetProcAddress", realGetProcAddress);
     void* kernelbaseGetProc = procAddressFrom("KERNELBASE.dll", "GetProcAddress", realGetProcAddress);
     void* nvapiQuery = procAddressFrom("nvapi64.dll", "nvapi_QueryInterface", realGetProcAddress);
-    void* originalGetProc = nullptr;
     void* originalNvQuery = nullptr;
 
     const DWORD maxDescriptors = importDir.Size / sizeof(IMAGE_IMPORT_DESCRIPTOR);
@@ -186,14 +193,12 @@ void patchModuleImportsUnsafe(HMODULE module)
             procName = "GetProcAddress";
             targetProc = kernel32GetProc;
             replacement = reinterpret_cast<void*>(&hookedGetProcAddress);
-            original = &originalGetProc;
         }
         else if (_stricmp(dllName, "KERNELBASE.dll") == 0)
         {
             procName = "GetProcAddress";
             targetProc = kernelbaseGetProc;
             replacement = reinterpret_cast<void*>(&hookedGetProcAddress);
-            original = &originalGetProc;
         }
         else if (_stricmp(dllName, "nvapi64.dll") == 0)
         {
@@ -239,10 +244,8 @@ void patchModuleImportsUnsafe(HMODULE module)
         }
     }
 
-    if (originalGetProc)
-        g_realGetProcAddress.store(reinterpret_cast<GetProcAddressFn>(originalGetProc), std::memory_order_release);
     if (originalNvQuery)
-        g_realNvApiQueryInterface.store(reinterpret_cast<NvApiQueryInterface>(originalNvQuery), std::memory_order_release);
+        storeRealNvApiQueryInterfaceIfUnset(reinterpret_cast<NvApiQueryInterface>(originalNvQuery));
 }
 
 void patchModuleImports(HMODULE module)
