@@ -229,9 +229,9 @@ void patchModuleImportsUnsafe(HMODULE module)
             {
                 nvapiQuery = procAddressFrom("nvapi64.dll", "nvapi_QueryInterface", realGetProcAddress);
                 nvapiQueryResolved = true;
+                storeRealNvApiQueryInterfaceIfUnset(reinterpret_cast<NvApiQueryInterface>(nvapiQuery));
             }
             targetProc = nvapiQuery;
-            storeRealNvApiQueryInterfaceIfUnset(reinterpret_cast<NvApiQueryInterface>(targetProc));
             replacement = reinterpret_cast<void*>(&hookedNvApiQueryInterface);
             original = &originalNvQuery;
         }
