@@ -20,6 +20,7 @@ constexpr DWORD kModuleScanIntervalMs = 1000;
 std::atomic<NvApiQueryInterface> g_realNvApiQueryInterface{ nullptr };
 std::atomic<GetProcAddressFn> g_realGetProcAddress{ ::GetProcAddress };
 std::atomic<bool> g_running{ true };
+// Owned only by the worker thread; keep scanAndPatchImports single-threaded.
 HMODULE g_scannedModules[512]{};
 unsigned int g_scannedModuleCount = 0;
 
@@ -284,6 +285,7 @@ void patchModuleImports(HMODULE module)
     }
     __except (EXCEPTION_EXECUTE_HANDLER)
     {
+        // Ignore unusual or transient module layouts rather than crashing the target process.
     }
 }
 
@@ -312,12 +314,11 @@ void scanAndPatchImports()
 
 DWORD WINAPI workerThread(void*)
 {
-    seedRealNvApiQueryInterface();
-
     for (int i = 0; g_running && i < kModuleScanIterations; ++i)
     {
         scanAndPatchImports();
-        Sleep(kModuleScanIntervalMs);
+        if (i + 1 < kModuleScanIterations && g_running)
+            Sleep(kModuleScanIntervalMs);
     }
 
     return 0;
@@ -333,7 +334,7 @@ BOOL APIENTRY DllMain(HMODULE module, DWORD reason, void*)
         HMODULE pinned = nullptr;
         if (!GetModuleHandleExW(
             GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_PIN,
-            reinterpret_cast<LPCWSTR>(&DllMain),
+            reinterpret_cast<LPCWSTR>(workerThread),
             &pinned))
         {
             return FALSE;
