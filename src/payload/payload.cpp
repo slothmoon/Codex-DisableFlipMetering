@@ -327,7 +327,7 @@ void scanAndPatchImports()
     if (!enumModules)
         return;
 
-    HMODULE modules[kMaxScannedModules]{};
+    HMODULE modules[kMaxScannedModules];
     DWORD bytesNeeded = 0;
     if (!enumModules(GetCurrentProcess(), modules, sizeof(modules), &bytesNeeded))
         return;
