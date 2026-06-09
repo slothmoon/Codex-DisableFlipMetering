@@ -60,15 +60,15 @@ void storeRealNvApiQueryInterfaceIfUnset(NvApiQueryInterface queryInterface)
         return;
 
     NvApiQueryInterface expected = nullptr;
-    g_realNvApiQueryInterface.compare_exchange_strong(expected, queryInterface, std::memory_order_release, std::memory_order_acquire);
+    g_realNvApiQueryInterface.compare_exchange_strong(expected, queryInterface, std::memory_order_release, std::memory_order_relaxed);
 }
 
 void seedRealNvApiQueryInterface()
 {
-    if (g_realNvApiQueryInterface.load(std::memory_order_acquire))
+    if (g_realNvApiQueryInterface.load(std::memory_order_relaxed))
         return;
 
-    GetProcAddressFn realGetProcAddress = g_realGetProcAddress.load(std::memory_order_acquire);
+    GetProcAddressFn realGetProcAddress = g_realGetProcAddress.load(std::memory_order_relaxed);
     HMODULE module = GetModuleHandleW(L"nvapi64.dll");
     if (module)
     {
@@ -83,13 +83,13 @@ void* __cdecl hookedNvApiQueryInterface(unsigned int interfaceId)
     if (interfaceId == kNvApiD3D12SetFlipConfigId)
         return nullptr;
 
-    NvApiQueryInterface realNvApiQueryInterface = g_realNvApiQueryInterface.load(std::memory_order_acquire);
+    NvApiQueryInterface realNvApiQueryInterface = g_realNvApiQueryInterface.load(std::memory_order_relaxed);
     return realNvApiQueryInterface ? realNvApiQueryInterface(interfaceId) : nullptr;
 }
 
 FARPROC WINAPI hookedGetProcAddress(HMODULE module, LPCSTR procName)
 {
-    GetProcAddressFn realGetProcAddress = g_realGetProcAddress.load(std::memory_order_acquire);
+    GetProcAddressFn realGetProcAddress = g_realGetProcAddress.load(std::memory_order_relaxed);
     FARPROC proc = realGetProcAddress(module, procName);
 
     if (proc && procName && reinterpret_cast<uintptr_t>(procName) > 0xFFFF &&
@@ -177,7 +177,7 @@ void patchModuleImportsUnsafe(HMODULE module)
     if (!rvaRangeInImage(image, importDir.VirtualAddress, sizeof(IMAGE_IMPORT_DESCRIPTOR)))
         return;
 
-    GetProcAddressFn realGetProcAddress = g_realGetProcAddress.load(std::memory_order_acquire);
+    GetProcAddressFn realGetProcAddress = g_realGetProcAddress.load(std::memory_order_relaxed);
     void* kernel32GetProc = nullptr;
     void* kernelbaseGetProc = nullptr;
     void* nvapiQuery = nullptr;
@@ -243,17 +243,17 @@ void patchModuleImportsUnsafe(HMODULE module)
         if (!thunk)
             continue;
 
-        for (DWORD thunkIndex = 0; thunkIndex < 4096; ++thunkIndex, ++thunk)
-        {
-            if (!rvaRangeInImage(image, desc->FirstThunk + thunkIndex * sizeof(IMAGE_THUNK_DATA), sizeof(IMAGE_THUNK_DATA)) ||
-                !thunk->u1.Function)
-            {
-                break;
-            }
+        const DWORD thunkCapacity = (image.size - desc->FirstThunk) / sizeof(IMAGE_THUNK_DATA);
+        const DWORD maxThunks = thunkCapacity < 4096 ? thunkCapacity : 4096;
+        const DWORD maxOrigThunks = origThunk && desc->OriginalFirstThunk < image.size
+            ? (image.size - desc->OriginalFirstThunk) / sizeof(IMAGE_THUNK_DATA)
+            : 0;
 
+        for (DWORD thunkIndex = 0; thunkIndex < maxThunks && thunk->u1.Function; ++thunkIndex, ++thunk)
+        {
             bool shouldPatch = false;
             if (origThunk &&
-                rvaRangeInImage(image, desc->OriginalFirstThunk + thunkIndex * sizeof(IMAGE_THUNK_DATA), sizeof(IMAGE_THUNK_DATA)) &&
+                thunkIndex < maxOrigThunks &&
                 origThunk[thunkIndex].u1.AddressOfData &&
                 !IMAGE_SNAP_BY_ORDINAL(origThunk[thunkIndex].u1.Ordinal))
             {
