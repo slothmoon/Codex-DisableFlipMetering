@@ -22,6 +22,8 @@ constexpr unsigned int kMaxScannedModules = 512;
 std::atomic<NvApiQueryInterface> g_realNvApiQueryInterface{ nullptr };
 std::atomic<GetProcAddressFn> g_realGetProcAddress{ ::GetProcAddress };
 std::atomic<HMODULE> g_nvapiModule{ nullptr };
+std::atomic<void*> g_kernel32GetProcAddress{ nullptr };
+std::atomic<void*> g_kernelbaseGetProcAddress{ nullptr };
 std::atomic<bool> g_running{ true };
 // Owned only by the worker thread; keep scanAndPatchImports single-threaded.
 HMODULE g_scannedModules[kMaxScannedModules]{};
@@ -35,6 +37,14 @@ struct PeImageView
     DWORD size = 0;
 };
 
+struct ImportPatchTarget
+{
+    const char* procName = nullptr;
+    void* targetProc = nullptr;
+    void* replacement = nullptr;
+    void** original = nullptr;
+};
+
 void cacheNvApiModule(HMODULE module)
 {
     if (!module)
@@ -42,6 +52,15 @@ void cacheNvApiModule(HMODULE module)
 
     HMODULE expected = nullptr;
     g_nvapiModule.compare_exchange_strong(expected, module, std::memory_order_relaxed, std::memory_order_relaxed);
+}
+
+void cachePointer(std::atomic<void*>& cache, void* value)
+{
+    if (!value)
+        return;
+
+    void* expected = nullptr;
+    cache.compare_exchange_strong(expected, value, std::memory_order_relaxed, std::memory_order_relaxed);
 }
 
 bool rememberModule(HMODULE module)
@@ -71,6 +90,35 @@ void storeRealNvApiQueryInterfaceIfUnset(NvApiQueryInterface queryInterface)
 
     NvApiQueryInterface expected = nullptr;
     g_realNvApiQueryInterface.compare_exchange_strong(expected, queryInterface, std::memory_order_release, std::memory_order_relaxed);
+}
+
+void* procAddressFrom(const char* moduleName, const char* procName, GetProcAddressFn realGetProcAddress)
+{
+    HMODULE module = GetModuleHandleA(moduleName);
+    return module ? reinterpret_cast<void*>(realGetProcAddress(module, procName)) : nullptr;
+}
+
+void* cachedProcAddressFrom(std::atomic<void*>& cache, const char* moduleName, const char* procName, GetProcAddressFn realGetProcAddress)
+{
+    void* cached = cache.load(std::memory_order_relaxed);
+    if (cached)
+        return cached;
+
+    void* resolved = procAddressFrom(moduleName, procName, realGetProcAddress);
+    cachePointer(cache, resolved);
+    return cache.load(std::memory_order_relaxed);
+}
+
+void* nvApiQueryTarget(GetProcAddressFn realGetProcAddress)
+{
+    NvApiQueryInterface cached = g_realNvApiQueryInterface.load(std::memory_order_relaxed);
+    if (cached)
+        return reinterpret_cast<void*>(cached);
+
+    auto queryInterface = reinterpret_cast<NvApiQueryInterface>(
+        procAddressFrom("nvapi64.dll", "nvapi_QueryInterface", realGetProcAddress));
+    storeRealNvApiQueryInterfaceIfUnset(queryInterface);
+    return reinterpret_cast<void*>(g_realNvApiQueryInterface.load(std::memory_order_relaxed));
 }
 
 void seedRealNvApiQueryInterface()
@@ -187,10 +235,68 @@ bool patchThunk(IMAGE_THUNK_DATA* thunk, void* replacement, void** original)
     return true;
 }
 
-void* procAddressFrom(const char* moduleName, const char* procName, GetProcAddressFn realGetProcAddress)
+bool importPatchTargetForDll(const char* dllName, GetProcAddressFn realGetProcAddress, void*& originalNvQuery, ImportPatchTarget& target)
 {
-    HMODULE module = GetModuleHandleA(moduleName);
-    return module ? reinterpret_cast<void*>(realGetProcAddress(module, procName)) : nullptr;
+    if (_stricmp(dllName, "KERNEL32.dll") == 0)
+    {
+        target.procName = "GetProcAddress";
+        target.targetProc = cachedProcAddressFrom(g_kernel32GetProcAddress, "KERNEL32.dll", "GetProcAddress", realGetProcAddress);
+        target.replacement = reinterpret_cast<void*>(&hookedGetProcAddress);
+        return true;
+    }
+
+    if (_stricmp(dllName, "KERNELBASE.dll") == 0)
+    {
+        target.procName = "GetProcAddress";
+        target.targetProc = cachedProcAddressFrom(g_kernelbaseGetProcAddress, "KERNELBASE.dll", "GetProcAddress", realGetProcAddress);
+        target.replacement = reinterpret_cast<void*>(&hookedGetProcAddress);
+        return true;
+    }
+
+    if (_stricmp(dllName, "nvapi64.dll") == 0)
+    {
+        target.procName = "nvapi_QueryInterface";
+        target.targetProc = nvApiQueryTarget(realGetProcAddress);
+        target.replacement = reinterpret_cast<void*>(&hookedNvApiQueryInterface);
+        target.original = &originalNvQuery;
+        return true;
+    }
+
+    return false;
+}
+
+void patchMatchingThunks(const PeImageView& image, IMAGE_IMPORT_DESCRIPTOR* desc, const ImportPatchTarget& target)
+{
+    auto* thunk = rvaToPtr<IMAGE_THUNK_DATA>(image, desc->FirstThunk);
+    auto* origThunk = desc->OriginalFirstThunk ? rvaToPtr<IMAGE_THUNK_DATA>(image, desc->OriginalFirstThunk) : nullptr;
+    if (!thunk)
+        return;
+
+    const DWORD thunkCapacity = (image.size - desc->FirstThunk) / sizeof(IMAGE_THUNK_DATA);
+    const DWORD maxThunks = thunkCapacity < 4096 ? thunkCapacity : 4096;
+    const DWORD maxOrigThunks = origThunk && desc->OriginalFirstThunk < image.size
+        ? (image.size - desc->OriginalFirstThunk) / sizeof(IMAGE_THUNK_DATA)
+        : 0;
+
+    for (DWORD thunkIndex = 0; thunkIndex < maxThunks && thunk->u1.Function; ++thunkIndex, ++thunk)
+    {
+        bool shouldPatch = false;
+        if (origThunk &&
+            thunkIndex < maxOrigThunks &&
+            origThunk[thunkIndex].u1.AddressOfData &&
+            !IMAGE_SNAP_BY_ORDINAL(origThunk[thunkIndex].u1.Ordinal))
+        {
+            auto* importByName = rvaToPtr<IMAGE_IMPORT_BY_NAME>(image, static_cast<DWORD>(origThunk[thunkIndex].u1.AddressOfData));
+            shouldPatch = importByName && std::strcmp(reinterpret_cast<const char*>(importByName->Name), target.procName) == 0;
+        }
+        else if (target.targetProc)
+        {
+            shouldPatch = reinterpret_cast<void*>(thunk->u1.Function) == target.targetProc;
+        }
+
+        if (shouldPatch)
+            patchThunk(thunk, target.replacement, target.original);
+    }
 }
 
 void patchModuleImportsUnsafe(HMODULE module)
@@ -206,12 +312,6 @@ void patchModuleImportsUnsafe(HMODULE module)
         return;
 
     GetProcAddressFn realGetProcAddress = g_realGetProcAddress.load(std::memory_order_relaxed);
-    void* kernel32GetProc = nullptr;
-    void* kernelbaseGetProc = nullptr;
-    void* nvapiQuery = nullptr;
-    bool kernel32GetProcResolved = false;
-    bool kernelbaseGetProcResolved = false;
-    bool nvapiQueryResolved = false;
     void* originalNvQuery = nullptr;
 
     const DWORD maxDescriptors = importDir.Size / sizeof(IMAGE_IMPORT_DESCRIPTOR);
@@ -222,80 +322,11 @@ void patchModuleImportsUnsafe(HMODULE module)
         if (!dllName || !desc->FirstThunk)
             continue;
 
-        const char* procName = nullptr;
-        void* targetProc = nullptr;
-        void* replacement = nullptr;
-        void** original = nullptr;
-        if (_stricmp(dllName, "KERNEL32.dll") == 0)
-        {
-            procName = "GetProcAddress";
-            if (!kernel32GetProcResolved)
-            {
-                kernel32GetProc = procAddressFrom("KERNEL32.dll", "GetProcAddress", realGetProcAddress);
-                kernel32GetProcResolved = true;
-            }
-            targetProc = kernel32GetProc;
-            replacement = reinterpret_cast<void*>(&hookedGetProcAddress);
-        }
-        else if (_stricmp(dllName, "KERNELBASE.dll") == 0)
-        {
-            procName = "GetProcAddress";
-            if (!kernelbaseGetProcResolved)
-            {
-                kernelbaseGetProc = procAddressFrom("KERNELBASE.dll", "GetProcAddress", realGetProcAddress);
-                kernelbaseGetProcResolved = true;
-            }
-            targetProc = kernelbaseGetProc;
-            replacement = reinterpret_cast<void*>(&hookedGetProcAddress);
-        }
-        else if (_stricmp(dllName, "nvapi64.dll") == 0)
-        {
-            procName = "nvapi_QueryInterface";
-            if (!nvapiQueryResolved)
-            {
-                nvapiQuery = procAddressFrom("nvapi64.dll", "nvapi_QueryInterface", realGetProcAddress);
-                nvapiQueryResolved = true;
-                storeRealNvApiQueryInterfaceIfUnset(reinterpret_cast<NvApiQueryInterface>(nvapiQuery));
-            }
-            targetProc = nvapiQuery;
-            replacement = reinterpret_cast<void*>(&hookedNvApiQueryInterface);
-            original = &originalNvQuery;
-        }
-        else
-        {
-            continue;
-        }
-
-        auto* thunk = rvaToPtr<IMAGE_THUNK_DATA>(image, desc->FirstThunk);
-        auto* origThunk = desc->OriginalFirstThunk ? rvaToPtr<IMAGE_THUNK_DATA>(image, desc->OriginalFirstThunk) : nullptr;
-        if (!thunk)
+        ImportPatchTarget target{};
+        if (!importPatchTargetForDll(dllName, realGetProcAddress, originalNvQuery, target))
             continue;
 
-        const DWORD thunkCapacity = (image.size - desc->FirstThunk) / sizeof(IMAGE_THUNK_DATA);
-        const DWORD maxThunks = thunkCapacity < 4096 ? thunkCapacity : 4096;
-        const DWORD maxOrigThunks = origThunk && desc->OriginalFirstThunk < image.size
-            ? (image.size - desc->OriginalFirstThunk) / sizeof(IMAGE_THUNK_DATA)
-            : 0;
-
-        for (DWORD thunkIndex = 0; thunkIndex < maxThunks && thunk->u1.Function; ++thunkIndex, ++thunk)
-        {
-            bool shouldPatch = false;
-            if (origThunk &&
-                thunkIndex < maxOrigThunks &&
-                origThunk[thunkIndex].u1.AddressOfData &&
-                !IMAGE_SNAP_BY_ORDINAL(origThunk[thunkIndex].u1.Ordinal))
-            {
-                auto* importByName = rvaToPtr<IMAGE_IMPORT_BY_NAME>(image, static_cast<DWORD>(origThunk[thunkIndex].u1.AddressOfData));
-                shouldPatch = importByName && std::strcmp(reinterpret_cast<const char*>(importByName->Name), procName) == 0;
-            }
-            else if (targetProc)
-            {
-                shouldPatch = reinterpret_cast<void*>(thunk->u1.Function) == targetProc;
-            }
-
-            if (shouldPatch)
-                patchThunk(thunk, replacement, original);
-        }
+        patchMatchingThunks(image, desc, target);
     }
 
     if (originalNvQuery)
